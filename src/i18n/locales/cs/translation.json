@@ -976,7 +976,9 @@
   "overlay": {
     "transcribing": "Přepisuji...",
     "processing": "Zpracovávám...",
-    "loadingModel": "Načítání modelu..."
+    "loadingModel": "Načítání modelu...",
+    "copy": "Copy last dictation",
+    "copied": "Copied"
   },
   "secureInput": {
     "blockedWithCulprit_one": "{{name}} může blokovat 1 zkratku",

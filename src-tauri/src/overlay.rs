@@ -683,6 +683,77 @@ pub fn show_overlay_notice(app_handle: &AppHandle, notice: &Notice) {
     });
 }
 
+/// Overlay state shown after a dictation was pasted: a pill with a copy button.
+const DONE_STATE: &str = "done";
+
+/// How long the copy pill stays up after a dictation.
+const DONE_HOLD: Duration = Duration::from_secs(5);
+
+/// The text of the last finished dictation, for the overlay's copy button.
+static LAST_OUTPUT: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Remembers `text` as the last dictation the overlay can copy.
+pub fn set_last_output(text: &str) {
+    if let Ok(mut last) = LAST_OUTPUT.lock() {
+        *last = Some(text.to_string());
+    }
+}
+
+/// The last finished dictation, if there was one this run.
+pub fn last_output() -> Option<String> {
+    LAST_OUTPUT.lock().ok().and_then(|last| last.clone())
+}
+
+/// Replaces the session's overlay with a pill offering to copy the dictation,
+/// for when it went into the wrong place or nowhere. It fades after
+/// [`DONE_HOLD`] unless something newer has shown.
+pub fn show_done_overlay(app_handle: &AppHandle) {
+    if !OVERLAY_ENABLED.load(Ordering::Relaxed) {
+        hide_recording_overlay(app_handle);
+        return;
+    }
+    OVERLAY_SESSION_SHOWING.store(false, Ordering::SeqCst);
+    OVERLAY_SESSION_LIVE.store(false, Ordering::SeqCst);
+
+    let handle = app_handle.clone();
+    // On the main thread for the same reason as show_overlay_state.
+    let _ = app_handle.run_on_main_thread(move || {
+        show_overlay_state_on_main(&handle, DONE_STATE);
+
+        let generation = OVERLAY_SHOW_GENERATION.load(Ordering::SeqCst);
+        std::thread::spawn(move || {
+            std::thread::sleep(DONE_HOLD);
+            if OVERLAY_SHOW_GENERATION.load(Ordering::SeqCst) == generation {
+                hide_recording_overlay(&handle);
+            }
+        });
+    });
+}
+
+/// Puts the last dictation on the clipboard, then fades the pill once the
+/// overlay has had time to confirm the copy. Returns whether there was one.
+pub fn copy_last_output(app_handle: &AppHandle) -> Result<bool, String> {
+    use tauri_plugin_clipboard_manager::ClipboardExt;
+
+    let Some(text) = last_output() else {
+        return Ok(false);
+    };
+    app_handle
+        .clipboard()
+        .write_text(text)
+        .map_err(|e| format!("Failed to write to clipboard: {e}"))?;
+
+    let handle = app_handle.clone();
+    let generation = OVERLAY_SHOW_GENERATION.load(Ordering::SeqCst);
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(900));
+        if OVERLAY_SHOW_GENERATION.load(Ordering::SeqCst) == generation {
+            hide_recording_overlay(&handle);
+        }
+    });
+    Ok(true)
+}
+
 /// Hides the notice early, unless a new session has replaced it.
 pub fn dismiss_overlay_notice(app_handle: &AppHandle) {
     let shown = OVERLAY_SHOW_GENERATION.load(Ordering::SeqCst);

@@ -136,6 +136,81 @@ fn build_system_prompt(prompt_template: &str) -> String {
     prompt_template.replace("${output}", "").trim().to_string()
 }
 
+/// A prompt that refers to `<dictation>` tags gets the transcript inside them,
+/// so the model can tell the text to clean from the instructions. Dictated
+/// requests ("write me a...") are otherwise carried out instead of typed.
+fn user_message_for(prompt: &str, transcription: &str) -> String {
+    if prompt.contains("<dictation>") {
+        format!("<dictation>\n{transcription}\n</dictation>")
+    } else {
+        transcription.to_string()
+    }
+}
+
+/// Longest dictation, in words, that can skip post-processing.
+const PLAIN_DICTATION_MAX_WORDS: usize = 12;
+
+/// Words that mean the speaker hesitated, corrected themselves, or is laying
+/// out a list, any of which post-processing has to handle.
+const POST_PROCESS_CUES: &[&str] = &[
+    "um",
+    "uh",
+    "uhh",
+    "umm",
+    "er",
+    "erm",
+    "hmm",
+    "actually",
+    "sorry",
+    "scratch",
+    "wait",
+    "mean",
+    "like",
+    "know",
+    "bullet",
+    "bullets",
+    "list",
+    "paragraph",
+    "line",
+    "one",
+    "two",
+    "first",
+    "firstly",
+    "second",
+    "secondly",
+    "number",
+    "underscore",
+    "dot",
+    "slash",
+    "dash",
+    "comma",
+    "period",
+    "colon",
+];
+
+/// Whether post-processing can change `transcription` for the better. A short
+/// sentence with no hesitation, self-correction or list cue comes out of the
+/// model as it went in, so sending it only adds the round trip (about a second)
+/// to the wait.
+fn worth_post_processing(transcription: &str) -> bool {
+    let words: Vec<String> = transcription
+        .split_whitespace()
+        .map(|word| {
+            word.trim_matches(|c: char| !c.is_alphanumeric())
+                .to_lowercase()
+        })
+        .filter(|word| !word.is_empty())
+        .collect();
+    if words.len() > PLAIN_DICTATION_MAX_WORDS {
+        return true;
+    }
+    let stuttered = words.windows(2).any(|pair| pair[0] == pair[1]);
+    stuttered
+        || words
+            .iter()
+            .any(|word| POST_PROCESS_CUES.contains(&word.as_str()))
+}
+
 /// Returns `true` when a transcription has no meaningful content to
 /// post-process (empty or whitespace-only). Used to skip the post-processing
 /// LLM call when nothing was actually transcribed, which would otherwise make
@@ -270,7 +345,7 @@ async fn post_process_transcription(
         debug!("Using structured outputs for provider '{}'", provider.id);
 
         let system_prompt = build_system_prompt(&prompt);
-        let user_content = transcription.to_string();
+        let user_content = user_message_for(&prompt, transcription);
 
         // Handle Apple Intelligence separately since it uses native Swift APIs
         if provider.id == APPLE_INTELLIGENCE_PROVIDER_ID {
@@ -384,7 +459,15 @@ async fn post_process_transcription(
     }
 
     // Legacy mode: Replace ${output} variable in the prompt with the actual text
-    let processed_prompt = prompt.replace("${output}", transcription);
+    // A prompt without the placeholder would otherwise send no transcript.
+    let processed_prompt = if prompt.contains("${output}") {
+        prompt.replace("${output}", transcription)
+    } else {
+        format!(
+            "{}\n\n<dictation>\n{transcription}\n</dictation>",
+            prompt.trim()
+        )
+    };
     debug!("Processed prompt length: {} chars", processed_prompt.len());
 
     match crate::llm_client::send_chat_completion(
@@ -439,7 +522,9 @@ pub(crate) async fn process_transcription_output(
     let mut post_process_prompt: Option<String> = None;
     let mut post_process_failed = false;
 
-    if post_process {
+    if post_process && !worth_post_processing(transcription) {
+        debug!("Post-processing skipped: short dictation with nothing to clean up");
+    } else if post_process {
         // A reply that's blank once cleaned is no better than none.
         let outcome = match post_process_transcription(&settings, &final_text).await {
             PostProcessOutcome::Done(text) => non_blank_post_processed_text(text)
@@ -691,7 +776,10 @@ impl ShortcutAction for TranscribeAction {
         play_feedback_sound(app, SoundType::Stop);
 
         let binding_id = binding_id.to_string(); // Clone binding_id for the async task
-        let post_process = self.post_process;
+        let post_process = self.post_process || {
+            let settings = get_settings(app);
+            settings.post_process_enabled && settings.post_process_main_shortcut
+        };
         let cancel_generation = rm.cancel_generation();
 
         tauri::async_runtime::spawn(async move {
@@ -787,6 +875,7 @@ impl ShortcutAction for TranscribeAction {
                                 transcription_time.elapsed(),
                                 utils::redact_text(&transcription)
                             );
+                            let transcribed_at = stop_time.elapsed();
 
                             if post_process {
                                 if use_streaming_overlay {
@@ -813,6 +902,8 @@ impl ShortcutAction for TranscribeAction {
                                 set_tray_state(&ah, TrayIconState::Idle);
                                 return;
                             }
+
+                            let processed_at = stop_time.elapsed();
 
                             // Save to history if WAV was saved
                             if wav_saved {
@@ -877,12 +968,27 @@ impl ShortcutAction for TranscribeAction {
                                         // UI while this paste ran.
                                         let owns_ui =
                                             || RECORDING_SESSION.load(Ordering::SeqCst) == session;
+                                        // Kept whether or not the paste lands, so the
+                                        // overlay can still hand the text over.
+                                        crate::overlay::set_last_output(&final_text);
                                         let (outcome, notice) =
                                             match utils::paste(final_text, ah_clone.clone()) {
                                                 Ok(()) => {
                                                     debug!(
                                                         "Text pasted successfully in {:?}",
                                                         paste_time.elapsed()
+                                                    );
+                                                    // One line per dictation for
+                                                    // bench/latency_from_log.py.
+                                                    log::info!(
+                                                        "dictation timing: audio={:.2}s transcribe={}ms post_process={}ms paste={}ms total={}ms",
+                                                        sample_count as f64
+                                                            / crate::audio_toolkit::constants::WHISPER_SAMPLE_RATE
+                                                                as f64,
+                                                        transcribed_at.as_millis(),
+                                                        (processed_at - transcribed_at).as_millis(),
+                                                        paste_time.elapsed().as_millis(),
+                                                        stop_time.elapsed().as_millis(),
                                                     );
                                                     // Leave a newer session's notice alone.
                                                     if owns_ui() {
@@ -915,7 +1021,7 @@ impl ShortcutAction for TranscribeAction {
                                                 notices::raise(&ah_clone, notice)
                                             }
                                             (true, None) => {
-                                                utils::hide_recording_overlay(&ah_clone)
+                                                crate::overlay::show_done_overlay(&ah_clone)
                                             }
                                             (false, Some(notice)) => {
                                                 notices::raise_without_overlay(&ah_clone, notice)
@@ -1072,7 +1178,7 @@ mod tests {
     use super::{
         complete_unless_cancelled, is_blank_transcription, non_blank_post_processed_text,
         post_process_transcription, should_use_streaming_overlay, strip_invisible_chars,
-        strip_think_block, PostProcessOutcome,
+        strip_think_block, user_message_for, worth_post_processing, PostProcessOutcome,
     };
     use crate::settings::{get_default_settings, AppSettings, OverlayStyle};
     use std::future;
@@ -1156,6 +1262,35 @@ mod tests {
             run_post_process(&post_process_settings(&url), "hello"),
             PostProcessOutcome::Failed
         );
+    }
+
+    #[test]
+    fn short_plain_dictation_skips_post_processing() {
+        assert!(!worth_post_processing(
+            "Yeah, that works for me. Let's do 2:30 tomorrow."
+        ));
+        assert!(!worth_post_processing("Sounds good."));
+    }
+
+    #[test]
+    fn dictation_with_something_to_clean_up_is_post_processed() {
+        // Hesitation, self-correction, a list cue, a stutter, and length.
+        assert!(worth_post_processing("Um, can you rerun the tests?"));
+        assert!(worth_post_processing("Let's meet Friday, actually Monday."));
+        assert!(worth_post_processing("First open settings, then restart."));
+        assert!(worth_post_processing("I think the the build is broken."));
+        assert!(worth_post_processing(
+            "I talked to both of them about it and they are fine with either date so pick whichever."
+        ));
+    }
+
+    #[test]
+    fn transcript_is_tagged_only_for_prompts_that_use_the_tags() {
+        assert_eq!(
+            user_message_for("Clean the text inside <dictation> tags.", "hello"),
+            "<dictation>\nhello\n</dictation>"
+        );
+        assert_eq!(user_message_for("Clean this text.", "hello"), "hello");
     }
 
     #[test]

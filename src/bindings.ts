@@ -1047,6 +1047,18 @@ async dismissNotice(source: NoticeSource, code: NoticeCode) : Promise<void> {
     await TAURI_INVOKE("dismiss_notice", { source, code });
 },
 /**
+ * Copies the last dictation to the clipboard, from the overlay's copy pill.
+ * Returns `false` when nothing has been dictated since launch.
+ */
+async copyLastDictation() : Promise<Result<boolean, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("copy_last_dictation") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Hides the overlay notice; it stays active in the tray and footer.
  */
 async dismissOverlayNotice() : Promise<void> {
@@ -1138,7 +1150,7 @@ airpods_mode?: boolean; keyboard_implementation?: KeyboardImplementation; show_t
  * after the target app actually reads the transcript, instead of after a
  * fixed delay. See `paste_tx`. macOS and Windows only.
  */
-reliable_paste?: boolean; typing_tool?: TypingTool; external_script_path?: string | null; filler_word_removal_enabled?: boolean; custom_filler_words?: string[] | null; 
+reliable_paste?: boolean; post_process_main_shortcut?: boolean; fork_defaults_applied?: boolean; typing_tool?: TypingTool; external_script_path?: string | null; filler_word_removal_enabled?: boolean; custom_filler_words?: string[] | null; 
 /**
  * Fresh installs default from the OS locale; existing stores are migrated
  * in `apply_settings_migrations`.

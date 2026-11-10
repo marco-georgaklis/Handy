@@ -224,6 +224,14 @@ pub fn dismiss_overlay_notice(app: AppHandle) {
     overlay::dismiss_overlay_notice(&app);
 }
 
+/// Copies the last dictation to the clipboard, from the overlay's copy pill.
+/// Returns `false` when nothing has been dictated since launch.
+#[tauri::command]
+#[specta::specta]
+pub fn copy_last_dictation(app: AppHandle) -> Result<bool, String> {
+    overlay::copy_last_output(&app)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

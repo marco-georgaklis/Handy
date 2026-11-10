@@ -24,6 +24,12 @@ pub struct CliArgs {
     #[arg(long)]
     pub cancel: bool,
 
+    /// Paste TEXT into the focused app through the running instance, exactly
+    /// as a finished dictation would be. For bench/paste, which checks what
+    /// each target app actually received.
+    #[arg(long, value_name = "TEXT")]
+    pub paste_text: Option<String>,
+
     /// Enable debug mode with verbose logging
     #[arg(long)]
     pub debug: bool,

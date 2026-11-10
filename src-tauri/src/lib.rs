@@ -815,6 +815,7 @@ pub fn run(cli_args: CliArgs) {
             notices::get_active_notices,
             notices::dismiss_notice,
             notices::dismiss_overlay_notice,
+            notices::copy_last_dictation,
         ])
         .events(collect_events![
             managers::history::HistoryUpdatePayload,
@@ -911,6 +912,22 @@ pub fn run(cli_args: CliArgs) {
                 signal_handle::send_transcription_input(app, "transcribe_with_post_process", "CLI");
             } else if args.iter().any(|a| a == "--cancel") {
                 crate::utils::cancel_current_operation(app);
+            } else if let Some(text) = args
+                .iter()
+                .position(|a| a == "--paste-text")
+                .and_then(|i| args.get(i + 1))
+                .cloned()
+            {
+                // Same output steps as a dictation; off the main thread, which
+                // paste needs free.
+                let app = app.clone();
+                std::thread::spawn(move || {
+                    overlay::set_last_output(&text);
+                    match utils::paste(text, app.clone()) {
+                        Ok(()) => overlay::show_done_overlay(&app),
+                        Err(e) => log::error!("--paste-text failed: {e}"),
+                    }
+                });
             } else {
                 // A second process was launched without remote-control flags
                 // (e.g. the binary run from a shell). On macOS, relaunching the

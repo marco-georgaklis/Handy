@@ -21,6 +21,7 @@ type OverlayState =
   | "streaming"
   | "transcribing"
   | "processing"
+  | "done"
   | "notice"
   | "live_notice";
 
@@ -80,6 +81,8 @@ const RecordingOverlay: React.FC = () => {
   // while overflowing, so the resting first line stays crisp flush under the pill.
   const [overflowing, setOverflowing] = useState(false);
   const [notice, setNotice] = useState<Notice | null>(null);
+  // The "done" pill's copy button was pressed and the dictation is on the clipboard.
+  const [copied, setCopied] = useState(false);
   const [noticeWidth, setNoticeWidth] = useState<number>();
   const noticeProbeRef = useRef<HTMLSpanElement>(null);
   const fadeTimerRef = useRef<ReturnType<typeof setTimeout>>();
@@ -127,6 +130,7 @@ const RecordingOverlay: React.FC = () => {
           // Keep the previous/default placement if settings can't be read.
         }
         setState(overlayState);
+        setCopied(false);
         if (overlayState === "streaming") {
           setPhase("listening");
           setWorkKind("transcribing");
@@ -425,6 +429,65 @@ const RecordingOverlay: React.FC = () => {
                 )
               : listeningRow(open, true)}
         </div>
+      </div>
+    );
+  }
+
+  // ---- Done: the dictation was typed. One button copies it, for when it went
+  // into the wrong place or the app took nothing.
+  if (state === "done") {
+    const copy = async () => {
+      const result = await commands.copyLastDictation();
+      if (result.status === "ok" && result.data) setCopied(true);
+    };
+    return (
+      <div
+        dir={direction}
+        className={`ov-stage ${position} ov-fade ${isVisible ? "show" : ""}`}
+      >
+        <button
+          className={`scard compact cdone ${copied ? "copied" : ""}`}
+          onClick={copy}
+          disabled={copied}
+        >
+          <span className="sbase sdone">
+            <svg className="dglyph" viewBox="0 0 16 16" aria-hidden="true">
+              {copied ? (
+                <path
+                  d="M3.5 8.5 L6.5 11.5 L12.5 4.5"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.6"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              ) : (
+                <>
+                  <rect
+                    x="5.5"
+                    y="5.5"
+                    width="8"
+                    height="8"
+                    rx="1.8"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.4"
+                  />
+                  <path
+                    d="M10.5 3.2 H4.3 A1.6 1.6 0 0 0 2.7 4.8 V10.5"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.4"
+                    strokeLinecap="round"
+                  />
+                </>
+              )}
+            </svg>
+            <span className="swork-label">
+              {copied ? t("overlay.copied") : t("overlay.copy")}
+            </span>
+          </span>
+        </button>
       </div>
     );
   }

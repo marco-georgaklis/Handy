@@ -160,6 +160,43 @@
   width: var(--ov-work-w);
 }
 
+/* Done: a pill that is one button, copying the dictation that was just typed. */
+.scard.compact.cdone {
+  width: auto;
+  padding: 0;
+  font: inherit;
+  cursor: pointer;
+  border-radius: 24px;
+  -webkit-appearance: none;
+  appearance: none;
+}
+.scard.compact.cdone:hover .swork-label,
+.scard.compact.cdone.copied .swork-label {
+  color: var(--color-text);
+}
+.scard.compact.cdone.copied {
+  cursor: default;
+}
+.sbase.sdone {
+  grid-template-columns: auto minmax(0, max-content);
+  justify-content: center;
+  gap: 7px;
+  padding: 0 14px;
+}
+.dglyph {
+  display: block;
+  width: 14px;
+  height: 14px;
+  flex: none;
+  color: var(--s-muted);
+}
+.scard.compact.cdone:hover .dglyph {
+  color: var(--color-text);
+}
+.scard.compact.cdone.copied .dglyph {
+  color: var(--s-accent);
+}
+
 /* Notice: badge and title, in the pill and the Live panel. */
 .scard.cnotice {
   cursor: pointer;
