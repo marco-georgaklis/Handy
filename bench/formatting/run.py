@@ -26,7 +26,7 @@ import urllib.error
 import urllib.request
 
 HERE = pathlib.Path(__file__).resolve().parent
-SETTINGS = pathlib.Path.home() / "Library/Application Support/com.pais.handy/settings_store.json"
+SETTINGS = pathlib.Path.home() / "Library/Application Support/com.handyflow.app/settings_store.json"
 BASE_URL = "https://openrouter.ai/api/v1"
 SCHEMA = {
     "type": "object",

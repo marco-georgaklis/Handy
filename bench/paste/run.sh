@@ -16,7 +16,7 @@
 # are checked by selecting all and copying, which is why they are opt-in.
 set -u
 
-HANDY="${HANDY_BIN:-/Applications/Handy.app/Contents/MacOS/handy}"
+HANDY="${HANDY_BIN:-/Applications/Handy Flow.app/Contents/MacOS/handy}"
 ROUNDS="${1:-20}"
 shift || true
 APPS=("$@")

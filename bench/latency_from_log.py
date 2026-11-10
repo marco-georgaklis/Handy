@@ -14,7 +14,7 @@ import pathlib
 import re
 import statistics
 
-DEFAULT_LOG = pathlib.Path.home() / "Library/Logs/com.pais.handy/handy.log"
+DEFAULT_LOG = pathlib.Path.home() / "Library/Logs/com.handyflow.app/handy.log"
 TIMING = re.compile(
     r"dictation timing: audio=([\d.]+)s transcribe=(\d+)ms post_process=(\d+)ms"
     r" paste=(\d+)ms total=(\d+)ms"
