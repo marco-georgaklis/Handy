@@ -45,3 +45,7 @@ result
 
 # Python bytecode (scripts/)
 __pycache__/
+
+# Handy Flow deployment
+.flow-deploy.env
+/release.*/
