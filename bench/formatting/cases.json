@@ -60,10 +60,10 @@
       "Intel Macs",
       "cold start",
       "billing",
-      "Thanks everyone"
+      "Thanks"
     ],
     "drop": [],
-    "outside_list": ["Hey team", "billing", "Thanks everyone"]
+    "outside_list": ["Hey team", "billing", "Thanks"]
   },
   {
     "id": "list-number-markers",
@@ -281,5 +281,60 @@
       "actually read it"
     ],
     "drop": ["I I", "the the", "that that", "has has", "you know"]
+  },
+  {
+    "id": "real-first-second-three",
+    "kind": "list",
+    "input": "This is a test. I'm trying to see if we actually improved things. And so I'm going to try out listing out a few things. So first, I want to see if we improved speed. Second, I want to see if we improved latency. And then three, I want to see if we improve formatting",
+    "list": "numbered",
+    "min_items": 3,
+    "keep": [
+      "This is a test",
+      "improved speed",
+      "improved latency",
+      "formatting"
+    ],
+    "drop": ["So first", "Second,", "then three"],
+    "count": {
+      "improved speed": 1,
+      "want to see if we": 3
+    },
+    "outside_list": ["This is a test"]
+  },
+  {
+    "id": "real-items-keep-detail",
+    "kind": "list",
+    "input": "Okay so for the release I need three things from you. First, I need you to double check the migration on a copy of the production database. Second, can you make sure the rollback script actually works. And third, uh, I want a short note for support explaining what changed.",
+    "list": "numbered",
+    "min_items": 3,
+    "keep": [
+      "copy of the production database",
+      "rollback script actually works",
+      "note for support explaining what changed"
+    ],
+    "drop": [" uh", "First,", "Second,"],
+    "count": {
+      "production database": 1,
+      "rollback script": 1
+    }
+  },
+  {
+    "id": "real-reasons",
+    "kind": "list",
+    "input": "I don't think we should switch vendors right now and there are a few reasons. One is that the contract doesn't end until June so we'd be paying twice. Another is that the team just finished learning the current tool. And the last one is that I haven't seen any evidence the new one is actually faster.",
+    "list": "any",
+    "min_items": 3,
+    "keep": [
+      "switch vendors",
+      "until June",
+      "paying twice",
+      "finished learning the current tool",
+      "evidence the new one is actually faster"
+    ],
+    "drop": [],
+    "count": {
+      "paying twice": 1
+    },
+    "outside_list": ["switch vendors"]
   }
 ]

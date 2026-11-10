@@ -143,6 +143,14 @@ def score(case, output):
         # separately so that words like "summary" don't trip the check.
         if needle in output:
             failures.append(f"kept '{needle.strip()}'")
+    for needle, expected in case.get("count", {}).items():
+        found = output.lower().count(needle.lower())
+        if found != expected:
+            failures.append(f"'{needle}' appears {found}x, expected {expected}")
+    if want in ("bullets", "numbered", "any") and items:
+        before = lines[: lines.index(items[0])]
+        if before and not before[-1].rstrip().endswith(":"):
+            failures.append("lead-in before the list does not end with a colon")
     outside = "\n".join(line for line in lines if line not in items)
     if want == "optional" and items and len(items) < 3:
         failures.append("list of fewer than 3 items")

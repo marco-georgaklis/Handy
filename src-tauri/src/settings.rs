@@ -943,6 +943,20 @@ fn default_typing_tool() -> TypingTool {
 
 fn ensure_post_process_defaults(settings: &mut AppSettings) -> bool {
     let mut changed = false;
+    // The built-in prompt is the app's, not the user's: a store keeps a copy,
+    // so a build that ships a better one has to replace it. To customize,
+    // duplicate it under another name.
+    let shipped = smart_formatting_prompt();
+    if let Some(stored) = settings
+        .post_process_prompts
+        .iter_mut()
+        .find(|prompt| prompt.id == SMART_FORMATTING_PROMPT_ID)
+    {
+        if stored.prompt != shipped.prompt {
+            stored.prompt = shipped.prompt;
+            changed = true;
+        }
+    }
     for provider in default_post_process_providers() {
         // Use match to do a single lookup - either sync existing or add new
         match settings

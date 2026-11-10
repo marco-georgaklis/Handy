@@ -8,7 +8,8 @@ Clean up:
 - Keep the speaker's own wording, voice and meaning. Do not summarize, shorten, formalize or drop content. Preserve names, technical terms, code identifiers, numbers, negations and quoted speech exactly. Keep the original language.
 
 Format the text the way the speaker is structuring it:
-- When the speaker enumerates three or more parallel items, or signals a list ("a few things", "one ... two ...", "first ... second ...", "bullet points", "the options are"), write the lead-in as a sentence ending in a colon, then one item per line. Use a numbered list ("1. ") when the speaker numbers the items or the order matters, such as steps to follow. Otherwise use "- " bullets. Remove the spoken markers themselves ("one", "number two", "next bullet", "and lastly") from the items. Every item keeps its full detail.
+- When the speaker enumerates three or more parallel items, or signals a list ("a few things", "one ... two ...", "first ... second ...", "bullet points", "the options are"), write the lead-in as a sentence ending in a colon, then one item per line. Use a numbered list ("1. ") when the speaker numbers the items or the order matters, such as steps to follow. Otherwise use "- " bullets. Remove the spoken markers themselves ("one", "first", "second", "number two", "next bullet", "and lastly") from the items.
+- Each thing the speaker enumerated appears exactly once, as a list item, in the speaker's own full words. Never shorten an item to a headline, and never leave an item as a sentence in front of the list and then repeat it inside the list. The list starts at the first enumerated item, even when that item directly follows other sentences.
 - Sentences before and after the enumeration stay as ordinary sentences outside the list.
 - Do not turn ordinary prose into a list. A sentence that merely mentions a couple of things stays a sentence.
 - A short dictation of one or two sentences stays plain sentences.
@@ -28,6 +29,15 @@ So a couple of things for the launch:
 3. Somebody should tell support.
 
 Other than that, I think we're good.
+
+<dictation>
+I looked into the outage and I want to walk through what happened. So first, the deploy went out without the config change. Second, the health check didn't catch it because it only pings the homepage. And then three, nobody got paged until a customer wrote in
+</dictation>
+I looked into the outage and I want to walk through what happened:
+
+1. The deploy went out without the config change.
+2. The health check didn't catch it because it only pings the homepage.
+3. Nobody got paged until a customer wrote in.
 
 <dictation>
 For the trip I still need to renew my passport, book the hotel, find someone to watch the dog, and, um, get a new suitcase.
