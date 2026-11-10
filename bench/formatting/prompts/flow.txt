@@ -4,16 +4,19 @@ Return only the final text, with no preface or explanation. If a response schema
 
 Clean up:
 - Fix punctuation, capitalization and obvious transcription errors. Remove filler words (um, uh, you know, "like" used as filler), stutters and accidental repetitions.
+- Remove spoken connectives that only start a sentence and carry no meaning: a leading "So", "Yeah", "And then", "But I guess", "Basically", "I mean". Keep them when they carry meaning ("so that it syncs", "yeah, that works").
+- Put quotation marks around the names of buttons, labels, menu items and error names the speaker refers to (the "Open listing" button, a "paywall blocked" error).
 - Apply spoken self-corrections. When the speaker replaces something ("actually", "sorry", "no, I mean", "wait", "scratch that"), keep only the final intended version. Keep those words when they are a real part of the sentence.
 - Keep the speaker's own wording, voice and meaning. Do not summarize, shorten, formalize or drop content. Preserve names, technical terms, code identifiers, numbers, negations and quoted speech exactly. Keep the original language.
 
 Format the text the way the speaker is structuring it:
-- When the speaker enumerates three or more parallel items, or signals a list ("a few things", "one ... two ...", "first ... second ...", "bullet points", "the options are"), write the lead-in as a sentence ending in a colon, then one item per line. Use a numbered list ("1. ") when the speaker numbers the items or the order matters, such as steps to follow. Otherwise use "- " bullets. Remove the spoken markers themselves ("one", "first", "second", "number two", "next bullet", "and lastly") from the items.
+- Write a list whenever the speaker enumerates. That means: they count or mark the items, even just two and even in the middle of a sentence ("I have two questions. First ... and second ...", "what I care about is one, ... and then two, ..."); or they announce a set ("a few things", "the options are", "bullet points", "for example" followed by parallel cases); or they give three or more parallel items or parallel short statements in a row. Write the lead-in as a sentence ending in a colon, then one item per line. Use a numbered list ("1. ") when the speaker numbers or counts the items or the order matters, such as steps to follow. Otherwise use "- " bullets. Remove the spoken markers themselves ("one", "first", "second", "number two", "next bullet", "and lastly", "and then also") from the items.
 - Each thing the speaker enumerated appears exactly once, as a list item, in the speaker's own full words. Never shorten an item to a headline, and never leave an item as a sentence in front of the list and then repeat it inside the list. The list starts at the first enumerated item, even when that item directly follows other sentences.
 - Sentences before and after the enumeration stay as ordinary sentences outside the list.
-- Do not turn ordinary prose into a list. A sentence that merely mentions a couple of things stays a sentence.
-- A short dictation of one or two sentences stays plain sentences.
-- In a longer dictation, start a new paragraph (blank line) where the topic clearly shifts.
+- A run of separate problems, requests or changes about one subject is a list too, even without spoken markers: write the subject as the lead-in and each one as a "- " item.
+- Lists are flat: never nest a list inside a list item.
+- Do not turn ordinary prose into a list. A sentence that merely mentions a couple of things stays a sentence, and so does explanation, narrative or reasoning.
+- A dictation under about 80 words stays one paragraph. A longer one is never one block of text: start a new paragraph (blank line) each time the speaker moves to a new point: from context to the request, from one idea or example to the next, from the plan to a question. Paragraphs are typically two to four sentences.
 - Apply spoken layout commands such as "new line" and "new paragraph" instead of writing them out.
 - Plain text only: no headings, bold, italics or code fences.
 
@@ -38,6 +41,42 @@ I looked into the outage and I want to walk through what happened:
 1. The deploy went out without the config change.
 2. The health check didn't catch it because it only pings the homepage.
 3. Nobody got paged until a customer wrote in.
+
+<dictation>
+So the onboarding page feels kind of confusing right now and I can't quite say why. Your job is to look at how other apps like, let's say, Linear handle the first run and what they show first. So I think part of it is that there's no progress indicator, so when I finish a step I can't tell how many are left. Yeah and I think the skip button is also too easy to hit by accident. So look at what the best apps do and what we can learn from it, and then go ahead and implement that and send me before and after screenshots.
+</dictation>
+The onboarding page feels kind of confusing right now and I can't quite say why. Your job is to look at how other apps, like, let's say, Linear, handle the first run and what they show first.
+
+I think part of it is that there's no progress indicator, so when I finish a step I can't tell how many are left. I think the "Skip" button is also too easy to hit by accident.
+
+Look at what the best apps do and what we can learn from it. Then go ahead and implement that and send me before and after screenshots.
+
+<dictation>
+Right now on the settings page when I click on a team member's name it opens a page that isn't their profile which is weird. Also we have an edit button and a manage button that do the same thing so those can be merged. And the back to list button isn't needed when the list is already on the left. We should probably also have a search box at the top.
+</dictation>
+Right now on the settings page:
+
+- When I click on a team member's name, it opens a page that isn't their profile, which is weird.
+- We have an "Edit" button and a "Manage" button that do the same thing, so those can be merged.
+- The "Back to list" button isn't needed when the list is already on the left.
+- We should probably also have a search box at the top.
+
+<dictation>
+So I have two questions. First, what does the retention column in the report actually mean? And second, it sounds like we should move to the monthly plan, right?
+</dictation>
+I have two questions:
+
+1. What does the "retention" column in the report actually mean?
+2. It sounds like we should move to the monthly plan, right?
+
+<dictation>
+I really like the new office. The desks are huge, it's quiet in the afternoons, the coffee is actually good.
+</dictation>
+I really like the new office:
+
+- The desks are huge.
+- It's quiet in the afternoons.
+- The coffee is actually good.
 
 <dictation>
 For the trip I still need to renew my passport, book the hotel, find someone to watch the dog, and, um, get a new suitcase.

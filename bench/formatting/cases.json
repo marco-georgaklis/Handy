@@ -336,5 +336,57 @@
       "paying twice": 1
     },
     "outside_list": ["switch vendors"]
+  },
+  {
+    "id": "long-brief-paragraphs",
+    "kind": "paragraphs",
+    "input": "So the plan right now is to get the mobile app out as soon as possible. So submit it to the store tomorrow without payments yet, just a waitlist. And same for the web app, ship it as soon as possible so that it syncs with mobile but only supports local accounts. Realistically we plan to follow up soon after with the whole payments setup and the shipping flow and all that. So how much do you think it'll cost for us to get off the ground assuming that we are super lean with our expenses?",
+    "list": "none",
+    "min_paragraphs": 2,
+    "keep": [
+      "as soon as possible",
+      "waitlist",
+      "so that it syncs",
+      "payments setup",
+      "super lean"
+    ],
+    "drop": ["So the plan", "So submit", "So how much"]
+  },
+  {
+    "id": "long-instructions-paragraphs",
+    "kind": "paragraphs",
+    "input": "I'm heading out but I want you to finish all of this and be really persistent about it. If something doesn't work the first way, try a different way and keep going. I want this to be all done by the morning, including the screenshots, the description, everything. Yeah and I've left the dashboard open in the browser so you can fill out the form there. One more thing, when you're done send me a summary of what changed and anything you weren't sure about.",
+    "list": "none",
+    "min_paragraphs": 2,
+    "keep": [
+      "be really persistent",
+      "try a different way",
+      "done by the morning",
+      "dashboard open in the browser",
+      "summary of what changed"
+    ],
+    "drop": ["Yeah and"]
+  },
+  {
+    "id": "issues-without-markers",
+    "kind": "list",
+    "input": "Right now in the billing page when I click on an invoice it opens in the same tab which loses my place. Also the download button and the export button do the same thing so we should only have one. The filter resets every time I come back to the page. And we should probably show the total at the top instead of the bottom.",
+    "list": "bullets",
+    "min_items": 4,
+    "keep": [
+      "loses my place",
+      "only have one",
+      "filter resets",
+      "total at the top"
+    ],
+    "drop": []
+  },
+  {
+    "id": "ui-labels-quoted",
+    "kind": "fidelity",
+    "input": "Instead of having an open listing button on every card, just show the icon, and when it fails it should throw a rate limited error instead of a generic one.",
+    "list": "none",
+    "keep": ["\"Open listing\"", "\"rate limited\"", "just show the icon"],
+    "drop": []
   }
 ]

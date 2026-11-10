@@ -75,3 +75,29 @@ bench/paste/run.sh 20 TextEdit Notes
 
 The target is 100% on both counts. A wrong-text failure is the bug this fork
 set out to fix: the old clipboard pasted instead of the dictation.
+
+## Against Wispr Flow
+
+Wispr Flow stores the raw speech-recognition text and the text it inserted for
+every dictation (`History.asrText` / `formattedText` / `pastedText` in
+`~/Library/Application Support/Wispr Flow/flow.sqlite`), plus its end-to-end
+latency. `compare/wispr_compare.py` runs our prompt on its raw text and
+compares the result with what it inserted: same words in, two formatters out.
+The export holds real dictations and stays out of the repository.
+
+On 2026-11-10, with `anthropic/claude-haiku-5.5`:
+
+| Sample                                | Measure                      | Result |
+| ------------------------------------- | ---------------------------- | ------ |
+| 62 most recent dictations (12+ words) | median word match with Wispr | 0.98   |
+|                                       | list where Wispr made none   | 0/59   |
+| 30 list or multi-paragraph dictations | list where Wispr made one    | 14/17  |
+|                                       | list where Wispr made none   | 0/13   |
+
+Latency is the open gap. Wispr Flow's recorded end-to-end median is 0.48 s
+(0.69 s for dictations over 40 words, 546 dictations). Our formatting request
+alone takes about 1.2 s on Haiku 5.5 and about 0.5 s on
+`openai/gpt-oss-120b:nitro`, which scores lower on the strict cases (59/70
+against 65/70).
+
+`compare/script.md` is a read-aloud script for a live side-by-side.
