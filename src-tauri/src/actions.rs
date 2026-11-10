@@ -551,6 +551,20 @@ pub(crate) async fn process_transcription_output(
         }
     }
 
+    // Style of the formatted path only: with post-processing off, the
+    // transcript goes out exactly as recognized.
+    let english = settings.selected_language.starts_with("en")
+        || settings
+            .spoken_languages
+            .iter()
+            .all(|l| l.starts_with("en"))
+            && !settings.spoken_languages.is_empty();
+    if post_process && english {
+        final_text = crate::dictation_style::lighten_commas(&final_text);
+        post_processed_text =
+            post_processed_text.map(|text| crate::dictation_style::lighten_commas(&text));
+    }
+
     ProcessedTranscription {
         final_text,
         post_processed_text,

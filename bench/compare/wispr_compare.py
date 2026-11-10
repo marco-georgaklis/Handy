@@ -137,6 +137,10 @@ def main():
         )
     )
     print(f"  length ours/Wispr:           p50={statistics.median(r['length_ratio'] for r in results):.2f}")
+    total_words = sum(r["words"] for r in results) or 1
+    per100 = lambda key, pattern: 100 * sum(len(re.findall(pattern, r[key])) for r in results) / total_words
+    for label, pattern in (("commas", ","), ("digit tokens", r"\d[\d,.]*"), ("hyphenated", r"\w-\w"), ("quotes", '["“”]')):
+        print(f"  {label + ' per 100 words:':<29}wispr {per100('wispr', pattern):.2f}  ours {per100('ours', pattern):.2f}")
     print(f"  our formatting request:      p50={statistics.median(ours_s):.2f}s p90={pct(ours_s, 0.9):.2f}s")
     if theirs_ms:
         print(

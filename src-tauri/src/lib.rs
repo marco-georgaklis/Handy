@@ -9,6 +9,7 @@ mod chinese_script;
 pub mod cli;
 mod clipboard;
 mod commands;
+mod dictation_style;
 pub mod engine_supervisor;
 mod helpers;
 mod input;

@@ -59,6 +59,27 @@ def api_key():
     return key
 
 
+OPENERS = (
+    "For example|For instance|Ideally|Right now|Okay|Also|Then|So|Yeah|Well|Now|Honestly|"
+    "Basically|Realistically|Actually|Anyway|Anyways|Obviously"
+)
+
+
+def lighten_commas(text):
+    """Mirror of src-tauri/src/dictation_style.rs, which the app applies to
+    formatted dictation. Keep the two in step."""
+    text = re.sub(r",(\s+(?:but|so|because)\s)", r"\1", text)
+    text = re.sub(
+        r"((?:^|\n)\s*(?:[-•]\s+|\d+\.\s+)?|[.!?:]\s+)(" + OPENERS + r"),(\s)", r"\1\2\3", text
+    )
+
+    def before_and(match):
+        sentence = re.split(r"[.!?:\n]", match.string[: match.start()])[-1]
+        return match.group(0) if "," in sentence[-60:] else match.group(1)
+
+    return re.sub(r",(\s+and\s)", before_and, text)
+
+
 def wrap(system_prompt, transcript):
     """Mirrors the app: a prompt that talks about <dictation> tags gets them."""
     if "<dictation>" in system_prompt:
@@ -108,7 +129,7 @@ def complete(key, model, system_prompt, transcript, timeout=60):
         content = json.loads(content)["transcription"]
     except (ValueError, KeyError, TypeError):
         pass  # the app also falls back to the raw content
-    return content, elapsed, None
+    return lighten_commas(content), elapsed, None
 
 
 def has(text, needle):
@@ -143,6 +164,8 @@ def score(case, output):
         # separately so that words like "summary" don't trip the check.
         if needle in output:
             failures.append(f"kept '{needle.strip()}'")
+    if "max_commas" in case and output.count(",") > case["max_commas"]:
+        failures.append(f"{output.count(',')} commas, expected at most {case['max_commas']}")
     for needle, expected in case.get("count", {}).items():
         found = output.lower().count(needle.lower())
         if found != expected:

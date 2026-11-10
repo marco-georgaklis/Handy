@@ -388,5 +388,31 @@
     "list": "none",
     "keep": ["\"Open listing\"", "\"rate limited\"", "just show the icon"],
     "drop": []
+  },
+  {
+    "id": "numbers-as-typed",
+    "kind": "fidelity",
+    "input": "We had some people paying a hundred bucks a month and churn was around fifteen percent, so if we get to ten k users that's a real business. Support has to be twenty four seven though.",
+    "list": "none",
+    "keep": ["$100", "15%", "24/7"],
+    "keep_any": [["10k", "10K", "10,000"]],
+    "drop": ["hundred bucks", "fifteen percent"]
+  },
+  {
+    "id": "light-commas",
+    "kind": "fidelity",
+    "input": "For example throughout the admin portal we link to listings and the standard for that should always be to show just the icon. So if we link out to the listing we'll have the icon on the card and it will support hovering to get a little text box.",
+    "list": "none",
+    "keep": ["show just the icon", "support hovering"],
+    "drop": ["For example,", "portal,", "listing,"],
+    "max_commas": 2
+  },
+  {
+    "id": "hyphenated-compounds",
+    "kind": "fidelity",
+    "input": "It's not super AI native but I want side by side screenshots and a long term plan for the one button flow.",
+    "list": "none",
+    "keep": ["AI-native", "side-by-side", "long-term", "one-button"],
+    "drop": []
   }
 ]
