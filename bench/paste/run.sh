@@ -9,6 +9,8 @@
 #
 #   bench/paste/run.sh [rounds] [app ...]      # default: 20 rounds, TextEdit Notes
 #
+# Run it while nobody is using the machine: it needs keyboard focus.
+#
 # Needs: the fork build running with Accessibility permission, and Automation
 # permission for the terminal to drive each target app (macOS asks on first
 # run). It types into a new TextEdit document / a new note; nothing else is
@@ -58,18 +60,35 @@ clear_field() {
   sleep 0.2
 }
 
-total=0; ok_text=0; ok_clip=0
+frontmost() {
+  osascript -e 'tell application "System Events" to get name of first process whose frontmost is true' 2>/dev/null
+}
+
+# Keystrokes and pastes go to whatever is focused, so every step first makes
+# sure that is still the target. If someone is using the machine, rounds are
+# skipped rather than typed into (or deleted from) their window.
+focused_on() {
+  [ "$(frontmost)" = "$1" ] && return 0
+  osascript -e "tell application \"$1\" to activate" >/dev/null 2>&1
+  sleep 0.4
+  [ "$(frontmost)" = "$1" ]
+}
+
+total=0; ok_text=0; ok_clip=0; skipped=0
 for app in "${APPS[@]}"; do
   prepare "$app"
   app_text=0; app_clip=0
   for i in $(seq 1 "$ROUNDS"); do
     sentinel="SENTINEL-$app-$i-$RANDOM"
     payload="dictation $i for $app: the quick brown fox, 1. one 2. two [$RANDOM]"
+    if ! focused_on "$app"; then skipped=$((skipped + 1)); continue; fi
     clear_field
     printf '%s' "$sentinel" | pbcopy
+    if ! focused_on "$app"; then skipped=$((skipped + 1)); continue; fi
     "$HANDY" --paste-text "$payload"
     sleep "$SETTLE"
     clip_after="$(pbpaste)"
+    if ! focused_on "$app"; then skipped=$((skipped + 1)); continue; fi
     got="$(read_field "$app")"
     printf '%s' "$sentinel" | pbcopy
     total=$((total + 1))
@@ -78,7 +97,7 @@ for app in "${APPS[@]}"; do
     if [ "$clip_after" = "$sentinel" ]; then app_clip=$((app_clip + 1)); ok_clip=$((ok_clip + 1));
     else echo "  [$app #$i] clipboard not restored: '${clip_after:0:60}'"; fi
   done
-  echo "$app: text correct $app_text/$ROUNDS, clipboard restored $app_clip/$ROUNDS"
+  echo "$app: text correct $app_text, clipboard restored $app_clip (of $ROUNDS rounds)"
 done
-echo "TOTAL: text correct $ok_text/$total, clipboard restored $ok_clip/$total"
+echo "TOTAL: text correct $ok_text/$total, clipboard restored $ok_clip/$total, skipped (focus lost) $skipped"
 [ "$ok_text" -eq "$total" ] && [ "$ok_clip" -eq "$total" ]
