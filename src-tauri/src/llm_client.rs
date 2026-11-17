@@ -216,9 +216,7 @@ fn build_headers(provider: &PostProcessProvider, api_key: &str) -> Result<Header
     Ok(headers)
 }
 
-/// HTTP client with provider-specific headers. The headers are set per
-/// request, so every instance can share one connection pool and consecutive
-/// requests reuse an open connection instead of a new TCP + TLS handshake.
+/// Each provider applies its own headers to requests on the shared connection pool.
 struct ProviderClient {
     client: &'static reqwest::Client,
     headers: HeaderMap,
@@ -237,8 +235,7 @@ impl ProviderClient {
     }
 }
 
-/// Process-wide client. A short idle timeout and TCP keepalive keep the pool
-/// from handing out connections that died during sleep or a network change.
+/// Connection timeouts cover opening a socket. Formatting POSTs also bound the response wait.
 fn shared_client() -> Result<&'static reqwest::Client, String> {
     static SHARED: OnceLock<reqwest::Client> = OnceLock::new();
     if let Some(client) = SHARED.get() {
@@ -253,7 +250,6 @@ fn shared_client() -> Result<&'static reqwest::Client, String> {
     Ok(SHARED.get_or_init(|| client))
 }
 
-/// Create an HTTP client with provider-specific headers
 fn create_client(provider: &PostProcessProvider, api_key: &str) -> Result<ProviderClient, String> {
     Ok(ProviderClient {
         client: shared_client()?,
