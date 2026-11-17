@@ -118,6 +118,7 @@ export const useTryEngine = ({ os }: { os: OSType }) => {
       const p = payload.phase;
       if (p === "started") {
         flushSettle();
+        stopWaiting();
         // The last result stays up until this take's way is known.
         clearTimeout(resultTimer.current);
         lockedRef.current = false;

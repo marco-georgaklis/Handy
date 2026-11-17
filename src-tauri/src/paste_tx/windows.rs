@@ -579,7 +579,7 @@ pub(super) fn run(
     auto_submit: bool,
     auto_submit_key: AutoSubmitKey,
     clipboard_handling: ClipboardHandling,
-) -> Result<(), String> {
+) -> Result<std::sync::mpsc::Receiver<()>, String> {
     let shared = Arc::new(WinTxShared {
         state: Mutex::new(TxState::new()),
         text: text.to_string(),
@@ -594,7 +594,11 @@ pub(super) fn run(
 
     let (ready_tx, ready_rx) = std::sync::mpsc::channel();
     let shared_for_pump = shared.clone();
-    thread::spawn(move || pump_thread(shared_for_pump, ready_tx));
+    let (done, settled) = std::sync::mpsc::channel();
+    thread::spawn(move || {
+        pump_thread(shared_for_pump, ready_tx);
+        let _ = done.send(());
+    });
 
     // Wait until the transcript is actually published (or the worker reports
     // why it could not) before injecting the chord.
@@ -620,5 +624,5 @@ pub(super) fn run(
         }
     }
 
-    Ok(())
+    Ok(settled)
 }

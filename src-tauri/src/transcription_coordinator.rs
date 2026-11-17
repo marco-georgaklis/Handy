@@ -199,7 +199,7 @@ enum Effect {
 /// Commands processed sequentially by the coordinator thread.
 enum Command {
     Input(InputEvent),
-    Cancel { recording_was_active: bool },
+    Cancel,
     ProcessingFinished,
 }
 
@@ -606,18 +606,20 @@ impl TranscriptionCoordinator {
                     let was_locked = state.is_recording_locked();
                     match cmd {
                         Command::Input(input) => {
-                            if let Some(effect) = state.on_input(input, Instant::now()) {
+                            let effect = state.on_input(input, Instant::now());
+                            // macOS reports physical releases; only X11 needs repeat grace.
+                            #[cfg(target_os = "macos")]
+                            let effect = effect.or_else(|| state.on_grace_expired());
+                            if let Some(effect) = effect {
                                 run_effect(&app, &mut state, effect);
                             }
                         }
-                        Command::Cancel {
-                            recording_was_active,
-                        } => {
-                            // A cancel while transcribing ends the take too.
-                            let busy =
-                                recording_was_active || matches!(state.stage, Stage::Processing);
+                        Command::Cancel => {
+                            let pending = matches!(state.stage, Stage::Processing)
+                                || crate::actions::output_pending();
+                            let recording_was_active = crate::utils::cancel_on_coordinator(&app);
                             state.on_cancel(recording_was_active);
-                            if busy {
+                            if pending || recording_was_active {
                                 emit_recording_phase(&app, RecordingPhase::Cancelled);
                             }
                         }
@@ -699,14 +701,8 @@ impl TranscriptionCoordinator {
         }
     }
 
-    pub fn notify_cancel(&self, recording_was_active: bool) {
-        if self
-            .tx
-            .send(Command::Cancel {
-                recording_was_active,
-            })
-            .is_err()
-        {
+    pub fn notify_cancel(&self) {
+        if self.tx.send(Command::Cancel).is_err() {
             warn!("Transcription coordinator channel closed");
         }
     }

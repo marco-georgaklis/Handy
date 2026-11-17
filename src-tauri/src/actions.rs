@@ -49,20 +49,26 @@ pub struct TranscriptionCompleteEvent {
     pub wait_seconds: f64,
 }
 
-fn emit_transcription_complete(
-    app: &AppHandle,
-    outcome: TranscriptionOutcome,
-    sample_count: usize,
-    stop_time: Instant,
-) {
-    let event = TranscriptionCompleteEvent {
-        outcome,
-        audio_seconds: sample_count as f64
-            / crate::audio_toolkit::constants::WHISPER_SAMPLE_RATE as f64,
-        wait_seconds: stop_time.elapsed().as_secs_f64(),
-    };
-    if let Err(e) = event.emit(app) {
-        warn!("Failed to emit transcription complete: {e}");
+impl DictationSession {
+    fn complete(
+        self: &Arc<Self>,
+        app: &AppHandle,
+        outcome: TranscriptionOutcome,
+        sample_count: usize,
+        stop_time: Instant,
+    ) {
+        if !self.is_current() || self.is_cancelled() {
+            return;
+        }
+        let event = TranscriptionCompleteEvent {
+            outcome,
+            audio_seconds: sample_count as f64
+                / crate::audio_toolkit::constants::WHISPER_SAMPLE_RATE as f64,
+            wait_seconds: stop_time.elapsed().as_secs_f64(),
+        };
+        if let Err(e) = event.emit(app) {
+            warn!("Failed to emit transcription complete: {e}");
+        }
     }
 }
 
@@ -78,22 +84,22 @@ fn empty_outcome(input_silent: bool) -> TranscriptionOutcome {
 const CANCELLATION_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 mod session;
-pub(crate) use session::cancel_current_dictation;
 use session::DictationSession;
+pub(crate) use session::{cancel_current_dictation, output_pending};
 
 /// Drop guard that finishes the transcription pipeline, including immediate
 /// model unloading on early exits.
-struct FinishGuard(AppHandle, Arc<TranscriptionManager>);
+struct FinishGuard(AppHandle);
 impl Drop for FinishGuard {
     fn drop(&mut self) {
-        self.1.maybe_unload_immediately("transcription session");
+        if !output_pending() {
+            self.0
+                .state::<Arc<TranscriptionManager>>()
+                .maybe_unload_immediately("empty or cancelled take");
+        }
         if let Some(c) = self.0.try_state::<TranscriptionCoordinator>() {
             c.notify_processing_finished();
         }
-        // The pipeline just freed its large transient buffers (captured PCM,
-        // WAV copy, engine scratch); hand the cached pages back to the OS so
-        // they don't sit in malloc arenas until they get swapped out (#1792).
-        crate::memory::trim_freed_memory();
     }
 }
 
@@ -583,7 +589,8 @@ impl ShortcutAction for TranscribeAction {
 
         // Load ASR model and VAD model in parallel
         let kickoff_started = Instant::now();
-        let load_started = tm.initiate_model_load(true);
+        let pipeline_free = !output_pending();
+        let load_started = pipeline_free && tm.initiate_model_load(true);
         let rm_clone = Arc::clone(&rm);
         std::thread::spawn(move || {
             if let Err(e) = rm_clone.preload_vad() {
@@ -637,7 +644,9 @@ impl ShortcutAction for TranscribeAction {
             streaming: model_supports_streaming,
             long_form: false,
         };
-        if live_decode(expected_model, settings.long_form_chunking) != LiveDecode::None {
+        if pipeline_free
+            && live_decode(expected_model, settings.long_form_chunking) != LiveDecode::None
+        {
             tm.start_stream();
         }
 
@@ -650,7 +659,7 @@ impl ShortcutAction for TranscribeAction {
                 );
                 set_tray_state(app, TrayIconState::Recording);
                 match settings.overlay_style {
-                    OverlayStyle::Live if model_supports_streaming => {
+                    OverlayStyle::Live if pipeline_free && model_supports_streaming => {
                         utils::show_streaming_overlay(app)
                     }
                     OverlayStyle::Live | OverlayStyle::Minimal => show_recording_overlay(app),
@@ -743,7 +752,8 @@ impl ShortcutAction for TranscribeAction {
         let style = get_settings(app).overlay_style;
         // Capture this before finalizing the stream so every later working state
         // targets the same overlay that was shown for this transcription.
-        let use_streaming_overlay = should_use_streaming_overlay(style, tm.is_streaming());
+        let use_streaming_overlay =
+            should_use_streaming_overlay(style, tm.stream_router().is_open() && tm.is_streaming());
         if use_streaming_overlay {
             tm.emit_stream_working(StreamWorkKind::Transcribing);
         } else {
@@ -765,7 +775,7 @@ impl ShortcutAction for TranscribeAction {
         let session = DictationSession::current();
 
         tauri::async_runtime::spawn(async move {
-            let guard = FinishGuard(ah.clone(), Arc::clone(&tm));
+            let guard = FinishGuard(ah.clone());
             debug!(
                 "Starting async transcription task for binding: {}",
                 binding_id
@@ -797,10 +807,17 @@ impl ShortcutAction for TranscribeAction {
                     tm.cancel_stream();
                     utils::hide_recording_overlay(&ah);
                     set_tray_state(&ah, TrayIconState::Idle);
-                    emit_transcription_complete(&ah, empty_outcome(input_silent), 0, stop_time);
+                    session.complete(&ah, empty_outcome(input_silent), 0, stop_time);
                 } else {
-                    // Save WAV concurrently with transcription
                     let sample_count = samples.len();
+                    let live = tm.stream_router().take();
+                    let (previous, finished) = session::reserve_output();
+                    drop(guard);
+                    session::wait_for_output(previous).await;
+                    if !session.begin_decode() {
+                        return;
+                    }
+                    // Save WAV concurrently with transcription
                     let file_name = format!("handy-{}.wav", chrono::Utc::now().timestamp_micros());
                     let wav_path = hm.recordings_dir().join(&file_name);
                     let wav_path_for_verify = wav_path.clone();
@@ -809,12 +826,17 @@ impl ShortcutAction for TranscribeAction {
                         crate::audio_toolkit::save_wav_file(&wav_path, &samples_for_wav)
                     });
 
-                    // Transcribe concurrently with WAV save: the live decode's
-                    // result when it has one (all audio was already fed to it),
-                    // otherwise a batch run of the samples. A cancel is surfaced
-                    // as an error, so it never starts a batch run.
+                    // Overlapping takes buffer their PCM. A previous take may have
+                    // unloaded the engine under the user's immediate-unload setting.
+                    if !tm.is_model_loaded() {
+                        tm.initiate_model_load(true);
+                    }
                     let transcription_time = Instant::now();
-                    let transcription_result = tm.transcribe_recording(samples);
+                    let transcription_result = tm.transcribe_recording(samples, live);
+                    if transcription_result.is_err() {
+                        tm.maybe_unload_immediately("failed take");
+                    }
+                    crate::memory::trim_freed_memory();
 
                     // Await WAV save and verify
                     let wav_saved = match wav_handle.await {
@@ -840,10 +862,9 @@ impl ShortcutAction for TranscribeAction {
                         }
                     };
 
-                    if rm.was_cancelled_since(cancel_generation) {
+                    if session.is_cancelled() {
                         debug!("Transcription operation cancelled before output handling");
-                        utils::hide_recording_overlay(&ah);
-                        set_tray_state(&ah, TrayIconState::Idle);
+                        session.hide_if_current(&ah);
                         return;
                     }
 
@@ -859,21 +880,12 @@ impl ShortcutAction for TranscribeAction {
                             );
                             let transcribed_at = stop_time.elapsed();
 
-                            if post_process {
+                            if post_process && session.is_current() {
                                 if use_streaming_overlay {
                                     tm.emit_stream_working(StreamWorkKind::Polishing);
                                 } else {
                                     show_processing_overlay(&ah);
                                 }
-                            }
-                            // Decoding and the recorder are free. Reserve this output's place
-                            // before admitting the next take, so a slow formatter or hook
-                            // cannot delay its microphone or reorder the two pastes.
-                            let (previous, finished) = session::reserve_output();
-                            drop(guard);
-                            session::wait_for_output(previous).await;
-                            if session.is_cancelled() {
-                                return;
                             }
                             let Some(processed) = complete_unless_cancelled(
                                 process_transcription_output(&ah, &transcription, post_process),
@@ -923,127 +935,60 @@ impl ShortcutAction for TranscribeAction {
 
                             if final_text.is_empty() {
                                 session.hide_if_current(&ah);
-                                emit_transcription_complete(
+                                session.complete(
                                     &ah,
                                     empty_outcome(input_silent),
                                     sample_count,
                                     stop_time,
                                 );
                             } else {
-                                let ah_clone = ah.clone();
-                                let paste_time = Instant::now();
-                                let post_process_failed = processed.post_process_failed;
-                                let paste_session = Arc::clone(&session);
-                                // The output turn lasts through the actual paste, including
-                                // any clipboard restore handled synchronously by this backend.
+                                let output = session::PasteOutput {
+                                    app: ah.clone(),
+                                    session: Arc::clone(&session),
+                                    sample_count,
+                                    stop_time,
+                                    transcribed_at,
+                                    processed_at,
+                                    post_process_failed: processed.post_process_failed,
+                                };
                                 tauri::async_runtime::spawn_blocking(move || {
-                                        let _finished = finished;
-                                        if paste_session.is_cancelled() {
-                                            return;
-                                        }
-                                        // Kept whether or not the paste lands, so the
-                                        // overlay can still hand the text over.
-                                        crate::overlay::set_last_output(&final_text);
-                                        let (outcome, notice) =
-                                            match utils::paste(final_text, ah_clone.clone()) {
-                                                Ok(()) => {
-                                                    debug!(
-                                                        "Text pasted successfully in {:?}",
-                                                        paste_time.elapsed()
-                                                    );
-                                                    // One line per dictation for
-                                                    // bench/latency_from_log.py.
-                                                    log::info!(
-                                                        "dictation timing: audio={:.2}s transcribe={}ms post_process={}ms paste={}ms total={}ms",
-                                                        sample_count as f64
-                                                            / crate::audio_toolkit::constants::WHISPER_SAMPLE_RATE
-                                                                as f64,
-                                                        transcribed_at.as_millis(),
-                                                        (processed_at - transcribed_at).as_millis(),
-                                                        paste_time.elapsed().as_millis(),
-                                                        stop_time.elapsed().as_millis(),
-                                                    );
-                                                    // Leave a newer session's notice alone.
-                                                    if paste_session.is_current() {
-                                                        notices::clear(
-                                                            &ah_clone,
-                                                            NoticeSource::Dictation,
-                                                        );
-                                                    }
-                                                    let notice = post_process_failed.then(|| {
-                                                        Notice::new(
-                                                            NoticeCode::PostProcessFailed,
-                                                            NoticeSource::Dictation,
-                                                        )
-                                                    });
-                                                    (TranscriptionOutcome::Typed, notice)
-                                                }
-                                                Err(e) => {
-                                                    error!("Failed to paste transcription: {}", e);
-                                                    (
-                                                        TranscriptionOutcome::Failed,
-                                                        Some(Notice::new(
-                                                            NoticeCode::PasteFailed,
-                                                            NoticeSource::Dictation,
-                                                        )),
-                                                    )
-                                                }
-                                            };
-                                        match (paste_session.is_current(), notice) {
-                                            (true, Some(notice)) => {
-                                                notices::raise(&ah_clone, notice)
-                                            }
-                                            (true, None) => {
-                                                crate::overlay::show_done_overlay(&ah_clone)
-                                            }
-                                            (false, Some(notice)) => {
-                                                notices::raise_without_overlay(&ah_clone, notice)
-                                            }
-                                            (false, None) => {}
-                                        }
-                                        if paste_session.is_current() {
-                                            set_tray_state(&ah_clone, TrayIconState::Idle);
-                                        }
-                                        emit_transcription_complete(
-                                            &ah_clone,
-                                            outcome,
-                                            sample_count,
-                                            stop_time,
-                                        );
-                                    })
-                                    .await
-                                    .map(|_| ())
-                                    .unwrap_or_else(|e| {
-                                        error!("Paste task failed: {:?}", e);
-                                        session.hide_if_current(&ah);
-                                        emit_transcription_complete(
-                                            &ah,
-                                            TranscriptionOutcome::Failed,
-                                            sample_count,
-                                            stop_time,
-                                        );
-                                    });
+                                    let _turn = finished;
+                                    output.paste(final_text);
+                                })
+                                .await
+                                .map(|_| ())
+                                .unwrap_or_else(|e| {
+                                    error!("Paste task failed: {:?}", e);
+                                    session.hide_if_current(&ah);
+                                    session.complete(
+                                        &ah,
+                                        TranscriptionOutcome::Failed,
+                                        sample_count,
+                                        stop_time,
+                                    );
+                                });
                             }
                         }
                         Err(err) => {
-                            if rm.was_cancelled_since(cancel_generation) {
+                            if session.is_cancelled() {
                                 debug!(
                                     "Transcription operation cancelled after transcription error"
                                 );
-                                utils::hide_recording_overlay(&ah);
-                                set_tray_state(&ah, TrayIconState::Idle);
+                                session.hide_if_current(&ah);
                                 return;
                             }
 
                             error!("Transcription failed: {}", err);
-                            notices::raise(
-                                &ah,
-                                Notice::new(
-                                    NoticeCode::TranscriptionFailed,
-                                    NoticeSource::Dictation,
-                                )
-                                .with_detail(err.to_string()),
-                            );
+                            if session.is_current() {
+                                notices::raise(
+                                    &ah,
+                                    Notice::new(
+                                        NoticeCode::TranscriptionFailed,
+                                        NoticeSource::Dictation,
+                                    )
+                                    .with_detail(err.to_string()),
+                                );
+                            }
                             // Save entry with empty text so user can retry
                             if wav_saved {
                                 if let Err(save_err) = hm.save_entry(
@@ -1057,8 +1002,10 @@ impl ShortcutAction for TranscribeAction {
                                     error!("Failed to save failed history entry: {}", save_err);
                                 }
                             }
-                            set_tray_state(&ah, TrayIconState::Idle);
-                            emit_transcription_complete(
+                            if session.is_current() {
+                                set_tray_state(&ah, TrayIconState::Idle);
+                            }
+                            session.complete(
                                 &ah,
                                 TranscriptionOutcome::Failed,
                                 sample_count,
@@ -1074,7 +1021,7 @@ impl ShortcutAction for TranscribeAction {
                 utils::hide_recording_overlay(&ah);
                 set_tray_state(&ah, TrayIconState::Idle);
                 if !rm.was_cancelled_since(cancel_generation) {
-                    emit_transcription_complete(&ah, TranscriptionOutcome::Empty, 0, stop_time);
+                    session.complete(&ah, TranscriptionOutcome::Empty, 0, stop_time);
                 }
             }
         });

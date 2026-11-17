@@ -134,7 +134,7 @@ pub struct StreamRouter {
 }
 
 /// One streaming worker's command channel.
-struct Route {
+pub(crate) struct Route {
     tx: mpsc::Sender<StreamCmd>,
     /// Set by `cancel_stream`, so the worker drops audio still queued ahead
     /// of the `Cancel` instead of decoding it.
@@ -165,7 +165,7 @@ impl StreamRouter {
 
     /// Take the route out (closing the channel to new feeds), so the caller
     /// can send the final `Finalize`/`Cancel` command.
-    fn take(&self) -> Option<Route> {
+    pub(crate) fn take(&self) -> Option<Route> {
         self.open.store(false, Ordering::Relaxed);
         self.route.lock().unwrap().take()
     }
@@ -906,16 +906,13 @@ impl TranscriptionManager {
     }
 
     /// Flush the live decode (a stream, or chunks decoded while recording)
-    /// and return what it produced. `recorded_samples` is the length of the
-    /// whole recording: a chunked decode that saw less reports no result.
-    ///
-    /// `Ok(None)` means no usable live result exists and the caller should
-    /// fall back to batch transcription. `Err` means the transcription was
+    /// from the detached route. Incomplete chunked results fall back to batch
+    /// transcription of the full recording. `Err` means the transcription was
     /// cancelled. There is no timeout here: waiting behind a model load is a
     /// queue position, not a failure (#1841), and the engine bounds the
     /// finalize itself by the audio it still has to decode.
-    fn finalize_live(&self, recorded_samples: usize) -> Result<Option<RunOutcome>> {
-        let Some(route) = self.router.take() else {
+    fn finalize_live(route: Option<Route>, recorded_samples: usize) -> Result<Option<RunOutcome>> {
+        let Some(route) = route else {
             return Ok(None);
         };
         let (reply_tx, reply_rx) = mpsc::channel();
@@ -966,11 +963,13 @@ impl TranscriptionManager {
         Ok(self.complete(Instant::now(), audio, None)?.text)
     }
 
-    /// Transcribe a finished recording: what its live decode produced, or a
-    /// batch run of the whole recording when there is no live result.
-    pub fn transcribe_recording(&self, samples: Vec<f32>) -> Result<Transcription> {
+    pub(crate) fn transcribe_recording(
+        &self,
+        samples: Vec<f32>,
+        route: Option<Route>,
+    ) -> Result<Transcription> {
         let started = Instant::now();
-        let live = self.finalize_live(samples.len())?;
+        let live = Self::finalize_live(route, samples.len())?;
         self.complete(started, samples, live)
     }
 

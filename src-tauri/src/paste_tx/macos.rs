@@ -193,7 +193,11 @@ fn flush_pending(app_handle: &AppHandle, enigo: &mut enigo::Enigo) {
     }
 }
 
-fn spawn_waiter(pending: Arc<Mutex<MacPending>>, app_handle: AppHandle) {
+fn spawn_waiter(
+    pending: Arc<Mutex<MacPending>>,
+    app_handle: AppHandle,
+    done: std::sync::mpsc::Sender<()>,
+) {
     thread::spawn(move || {
         let outcome = loop {
             thread::sleep(Duration::from_millis(15));
@@ -240,6 +244,7 @@ fn spawn_waiter(pending: Arc<Mutex<MacPending>>, app_handle: AppHandle) {
         let app_for_finish = app_handle.clone();
         let _ = app_handle.run_on_main_thread(move || {
             settle(&pending_for_finish, &app_for_finish, None);
+            let _ = done.send(());
             if let Ok(mut slot) = PENDING.lock() {
                 let is_us = slot
                     .as_ref()
@@ -261,7 +266,7 @@ pub(super) fn run(
     auto_submit: bool,
     auto_submit_key: AutoSubmitKey,
     clipboard_handling: ClipboardHandling,
-) -> Result<(), String> {
+) -> Result<std::sync::mpsc::Receiver<()>, String> {
     // Settle any previous transaction first so the snapshot below captures the
     // user's original clipboard, not the previous transcript.
     flush_pending(app_handle, enigo);
@@ -330,7 +335,7 @@ pub(super) fn run(
     if let Ok(mut slot) = PENDING.lock() {
         *slot = Some(pending.clone());
     }
-    spawn_waiter(pending, app_handle.clone());
-
-    Ok(())
+    let (done, settled) = std::sync::mpsc::channel();
+    spawn_waiter(pending, app_handle.clone(), done);
+    Ok(settled)
 }

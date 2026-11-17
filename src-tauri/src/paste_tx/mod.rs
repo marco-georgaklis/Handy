@@ -199,7 +199,7 @@ pub(crate) fn try_reliable_paste(
     auto_submit: bool,
     auto_submit_key: crate::settings::AutoSubmitKey,
     clipboard_handling: crate::settings::ClipboardHandling,
-) -> Result<(), String> {
+) -> Result<std::sync::mpsc::Receiver<()>, String> {
     platform::run(
         text,
         app_handle,

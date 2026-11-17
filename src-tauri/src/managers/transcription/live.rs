@@ -168,13 +168,14 @@ impl<'a> StreamSession<'a> {
         let on_progress = {
             let perf = Arc::clone(&perf);
             let app_handle = tm.app_handle.clone();
+            let router = tm.stream_router();
             let languages = setup.languages.clone();
             let mut preview_script = PreviewScript::new(settings.chinese_script, &output_language);
             move |progress: StreamProgress| {
                 let mut perf = lock_perf(&perf);
                 perf.record_compute(progress.elapsed);
                 perf.record_update(&progress.update);
-                if let Some(text) = progress.text {
+                if let Some(text) = progress.text.filter(|_| router.is_open()) {
                     perf.record_emit();
                     let (committed, tentative) =
                         preview_script.convert(&text.committed, &text.tentative, &languages);

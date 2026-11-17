@@ -837,7 +837,13 @@ pub fn paste(text: String, app_handle: AppHandle) -> Result<(), String> {
                     )
                 });
                 match reliable_result {
-                    Ok(()) => return Ok(()),
+                    Ok(settled) => {
+                        // This caller is off the main thread. Leave AppKit free to deliver
+                        // the pasteboard promise while holding this dictation's output turn.
+                        return settled
+                            .recv()
+                            .map_err(|_| "Clipboard settlement interrupted".into());
+                    }
                     Err(e) => {
                         log::warn!("Reliable paste unavailable ({e}); falling back to legacy paste")
                     }

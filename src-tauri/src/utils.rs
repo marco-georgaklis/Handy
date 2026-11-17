@@ -100,9 +100,14 @@ fn native_windows_machine() -> Option<u16> {
 /// Centralized cancellation function that can be called from anywhere in the app.
 /// Handles cancelling both recording and transcription operations and updates UI state.
 pub fn cancel_current_operation(app: &AppHandle) {
-    info!("Initiating operation cancellation...");
+    if let Some(coordinator) = app.try_state::<TranscriptionCoordinator>() {
+        coordinator.notify_cancel();
+    }
+}
 
-    crate::actions::cancel_current_dictation();
+pub(crate) fn cancel_on_coordinator(app: &AppHandle) -> bool {
+    info!("Initiating operation cancellation...");
+    let cancel_engine = crate::actions::cancel_current_dictation();
 
     // Unregister the cancel shortcut asynchronously
     shortcut::unregister_cancel_shortcut(app);
@@ -116,7 +121,9 @@ pub fn cancel_current_operation(app: &AppHandle) {
     // already in progress
     let tm = app.state::<Arc<TranscriptionManager>>();
     tm.cancel_stream();
-    tm.cancel_transcription();
+    if cancel_engine {
+        tm.cancel_transcription();
+    }
 
     // Update tray icon and hide overlay
     set_tray_state(app, crate::tray::TrayIconState::Idle);
@@ -125,14 +132,11 @@ pub fn cancel_current_operation(app: &AppHandle) {
     // Unload model if immediate unload is enabled. Done before notifying the
     // coordinator, so a recording started next always loads afresh; it
     // doesn't wait for the cancelled work, so it never blocks this thread.
-    tm.maybe_unload_immediately("cancellation");
-
-    // Notify coordinator so it can keep lifecycle state coherent.
-    if let Some(coordinator) = app.try_state::<TranscriptionCoordinator>() {
-        coordinator.notify_cancel(recording_was_active);
+    if cancel_engine {
+        tm.maybe_unload_immediately("cancellation");
     }
-
     info!("Operation cancellation completed - returned to idle state");
+    recording_was_active
 }
 
 /// Check if using the Wayland display server protocol
