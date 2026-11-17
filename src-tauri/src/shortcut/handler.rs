@@ -37,12 +37,36 @@ pub fn handle_shortcut_event(
     // Transcribe bindings are handled by the coordinator.
     if is_transcribe_binding(binding_id) {
         if let Some(coordinator) = app.try_state::<TranscriptionCoordinator>() {
+            let at = std::time::Instant::now();
+            let prepared = if settings.shortcut_activation
+                == crate::settings::ShortcutActivation::PushToTalk
+            {
+                app.state::<Arc<AudioRecordingManager>>()
+                    .warm_input
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .and_then(|input| {
+                        input.edge(
+                            binding_id,
+                            is_pressed,
+                            at,
+                            std::time::Duration::from_millis(settings.extra_recording_buffer_ms),
+                        )
+                    })
+            } else {
+                None
+            };
             coordinator.send_input(
-                binding_id,
-                hotkey_string,
-                is_pressed,
-                settings.shortcut_activation,
-                std::time::Duration::from_millis(settings.hold_threshold_ms),
+                crate::transcription_coordinator::InputEvent {
+                    binding_id: binding_id.into(),
+                    hotkey_string: hotkey_string.into(),
+                    is_pressed,
+                    mode: settings.shortcut_activation,
+                    hold_threshold: std::time::Duration::from_millis(settings.hold_threshold_ms),
+                    external: false,
+                },
+                prepared,
             );
         } else {
             warn!("TranscriptionCoordinator is not initialized");
@@ -62,14 +86,14 @@ pub fn handle_shortcut_event(
     if binding_id == "cancel" {
         let audio_manager = app.state::<Arc<AudioRecordingManager>>();
         if audio_manager.is_recording() && is_pressed {
-            action.start(app, binding_id, hotkey_string);
+            action.start(app, binding_id, hotkey_string, None);
         }
         return;
     }
 
     // Remaining bindings (e.g. "test") use simple start/stop on press/release.
     if is_pressed {
-        action.start(app, binding_id, hotkey_string);
+        action.start(app, binding_id, hotkey_string, None);
     } else {
         action.stop(
             app,

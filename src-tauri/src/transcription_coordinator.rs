@@ -1,7 +1,7 @@
 use crate::input::PasteDestination;
 mod drain;
 use crate::actions::ACTION_MAP;
-use crate::managers::audio::AudioRecordingManager;
+use crate::managers::audio::{AudioRecordingManager, WarmTake};
 use crate::settings::ShortcutActivation;
 use log::{debug, error, warn};
 use serde::{Deserialize, Serialize};
@@ -159,17 +159,17 @@ enum Stage {
 }
 
 /// A keyboard/signal edge for a transcribe binding.
-struct InputEvent {
-    binding_id: String,
-    hotkey_string: String,
-    is_pressed: bool,
-    mode: ShortcutActivation,
+pub(crate) struct InputEvent {
+    pub(crate) binding_id: String,
+    pub(crate) hotkey_string: String,
+    pub(crate) is_pressed: bool,
+    pub(crate) mode: ShortcutActivation,
     /// Hold-or-toggle: minimum press duration that counts as a hold.
-    hold_threshold: Duration,
+    pub(crate) hold_threshold: Duration,
     /// External triggers (SIGUSR2, CLI flags) rather than physical keys.
     /// They fire on every edge by design and must never be debounced —
     /// dropping one desyncs toggle parity and wedges recording on.
-    external: bool,
+    pub(crate) external: bool,
 }
 
 impl InputEvent {
@@ -201,7 +201,7 @@ enum Effect {
 /// Commands processed sequentially by the coordinator thread.
 enum Command {
     GraceExpired,
-    Input(InputEvent, Instant, PasteDestination),
+    Input(InputEvent, Instant, PasteDestination, Option<Arc<WarmTake>>),
     Cancel,
     ProcessingFinished,
 }
@@ -600,17 +600,17 @@ impl TranscriptionCoordinator {
                     match cmd {
                         Command::GraceExpired => {
                             if let Some(effect) = state.on_grace_expired() {
-                                run_effect(&app, &mut state, effect, destination);
+                                run_effect(&app, &mut state, effect, destination, None);
                             }
                         }
-                        Command::Input(input, _, target) => {
+                        Command::Input(input, _, target, prepared) => {
                             destination = target;
                             let effect = state.on_input(input, at);
                             // macOS reports physical releases; only X11 needs repeat grace.
                             #[cfg(target_os = "macos")]
                             let effect = effect.or_else(|| state.on_grace_expired());
                             if let Some(effect) = effect {
-                                run_effect(&app, &mut state, effect, destination);
+                                run_effect(&app, &mut state, effect, destination, prepared);
                             }
                         }
                         Command::Cancel => {
@@ -624,7 +624,7 @@ impl TranscriptionCoordinator {
                         }
                         Command::ProcessingFinished => {
                             if let Some(effect) = state.on_processing_finished() {
-                                run_effect(&app, &mut state, effect, destination);
+                                run_effect(&app, &mut state, effect, destination, None);
                             }
                         }
                     }
@@ -647,66 +647,26 @@ impl TranscriptionCoordinator {
         Self { tx }
     }
 
-    /// Send a keyboard input event for a transcribe binding. `hold_threshold`
-    /// only matters for [`ShortcutActivation::HoldOrToggle`].
-    pub fn send_input(
-        &self,
-        binding_id: &str,
-        hotkey_string: &str,
-        is_pressed: bool,
-        mode: ShortcutActivation,
-        hold_threshold: Duration,
-    ) {
-        self.send(
-            binding_id,
-            hotkey_string,
-            is_pressed,
-            mode,
-            hold_threshold,
-            false,
-        );
-    }
-
-    /// Send an external trigger (SIGUSR2, CLI flag). Always a toggle press,
-    /// always exempt from debounce — see [`InputEvent::external`].
-    pub fn send_external_input(&self, binding_id: &str, source: &str) {
-        self.send(
-            binding_id,
-            source,
-            true,
-            ShortcutActivation::Toggle,
-            Duration::ZERO,
-            true,
-        );
-    }
-
-    fn send(
-        &self,
-        binding_id: &str,
-        hotkey_string: &str,
-        is_pressed: bool,
-        mode: ShortcutActivation,
-        hold_threshold: Duration,
-        external: bool,
-    ) {
-        if self
-            .tx
-            .send(Command::Input(
-                InputEvent {
-                    binding_id: binding_id.to_string(),
-                    hotkey_string: hotkey_string.to_string(),
-                    is_pressed,
-                    mode,
-                    hold_threshold,
-                    external,
-                },
-                Instant::now(),
-                PasteDestination::focused(),
-            ))
-            .is_err()
-        {
+    pub(crate) fn send_input(&self, input: InputEvent, prepared: Option<Arc<WarmTake>>) {
+        let edge = Command::Input(input, Instant::now(), PasteDestination::focused(), prepared);
+        if self.tx.send(edge).is_err() {
             warn!("Transcription coordinator channel closed");
         }
+    }
+
+    /// External triggers always toggle and are exempt from debounce.
+    pub fn send_external_input(&self, binding_id: &str, source: &str) {
+        self.send_input(
+            InputEvent {
+                binding_id: binding_id.to_owned(),
+                hotkey_string: source.to_owned(),
+                is_pressed: true,
+                mode: ShortcutActivation::Toggle,
+                hold_threshold: Duration::ZERO,
+                external: true,
+            },
+            None,
+        );
     }
 
     pub fn notify_cancel(&self) {
@@ -727,13 +687,14 @@ fn run_effect(
     state: &mut CoordinatorState,
     effect: Effect,
     destination: PasteDestination,
+    prepared: Option<Arc<WarmTake>>,
 ) {
     match effect {
         Effect::Start {
             binding_id,
             hotkey_string,
         } => {
-            let started = start(app, &binding_id, &hotkey_string);
+            let started = start(app, &binding_id, &hotkey_string, prepared);
             state.on_start_result(&binding_id, started);
             if started {
                 emit_recording_phase(app, RecordingPhase::Started);
@@ -751,12 +712,17 @@ fn run_effect(
 
 /// Execute a start effect; returns whether recording actually began, so the
 /// state machine can roll back its optimistic transition on failure.
-fn start(app: &AppHandle, binding_id: &str, hotkey_string: &str) -> bool {
+fn start(
+    app: &AppHandle,
+    binding_id: &str,
+    hotkey_string: &str,
+    prepared: Option<Arc<WarmTake>>,
+) -> bool {
     let Some(action) = ACTION_MAP.get(binding_id) else {
         warn!("No action in ACTION_MAP for '{binding_id}'");
         return false;
     };
-    action.start(app, binding_id, hotkey_string);
+    action.start(app, binding_id, hotkey_string, prepared);
     let recording = app
         .try_state::<Arc<AudioRecordingManager>>()
         .is_some_and(|a| a.is_recording());

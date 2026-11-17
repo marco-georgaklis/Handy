@@ -33,7 +33,7 @@ impl DrainInputs {
             None => rx.recv().ok()?,
         };
         let at = match &cmd {
-            Command::Input(_, at, _) => *at,
+            Command::Input(_, at, ..) => *at,
             _ => Instant::now(),
         };
         if let Some(deadline) = state.grace_deadline() {
@@ -108,6 +108,7 @@ mod tests {
                 },
                 at,
                 crate::input::PasteDestination::focused(),
+                None,
             );
             assert!(drain
                 .accept(edge, at, &Stage::Processing, || cuts += 1)

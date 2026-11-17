@@ -11,13 +11,16 @@ use crate::managers::transcription::StreamRouter;
 use crate::notices::NoticeCode;
 use crate::settings::{get_settings, write_settings, AppSettings, VadBackend};
 use crate::utils;
-use handy_recorder::{Channels, EndReason, ErrorKind, Recorder, RecorderConfig, StartError};
+use handy_recorder::{Channels, EndReason, ErrorKind, RecorderConfig, StartError};
 use log::{debug, error, info, trace, warn};
+mod device;
 mod trailing_buffer;
+mod warm;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::{Emitter, Manager};
+pub(crate) use warm::{WarmInput, WarmTake};
 
 const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const SILERO_VAD_THRESHOLD: f32 = 0.3;
@@ -294,7 +297,7 @@ enum VadSlot {
 
 /// An open microphone: the stream is running whether or not it is recording.
 struct OpenMicrophone {
-    recorder: Recorder<CaptureSink>,
+    recorder: device::Device,
     /// Set when this recorder fails. Its own flag, so a failure handler that
     /// runs late can't mark a replacement recorder failed.
     failed: Arc<AtomicBool>,
@@ -306,19 +309,7 @@ impl OpenMicrophone {
     }
 }
 
-/// The notice for a recording that couldn't start.
-pub fn recording_notice_code(error: &anyhow::Error) -> NoticeCode {
-    match error
-        .downcast_ref::<handy_recorder::Error>()
-        .map(handy_recorder::Error::kind)
-    {
-        Some(ErrorKind::PermissionDenied) => NoticeCode::MicPermissionDenied,
-        // A missing selected microphone falls back to the default, so this
-        // means there is no input device at all.
-        Some(ErrorKind::DeviceUnavailable) => NoticeCode::NoMicrophone,
-        _ => NoticeCode::RecordingFailed,
-    }
-}
+pub use device::recording_notice_code;
 
 /* ──────────────────────────────────────────────────────────────── */
 
@@ -411,9 +402,12 @@ fn microphone_config(
     }
 }
 
-fn open_microphone(config: RecorderConfig) -> Result<OpenMicrophone, handy_recorder::Error> {
+fn open_microphone(
+    config: RecorderConfig,
+    warm: bool,
+) -> Result<OpenMicrophone, handy_recorder::Error> {
     let failed = Arc::new(AtomicBool::new(false));
-    let recorder = Recorder::open_with_failure_handler(config, {
+    let recorder = device::Device::open(config, warm, {
         let failed = Arc::clone(&failed);
         // handy-recorder logs the failure. The stream is rebuilt on the next
         // start; a recording in progress keeps the audio captured before it.
@@ -429,21 +423,18 @@ fn open_microphone_on_channel(
     channel: Option<u16>,
     take_headset: bool,
     frames_per_chunk: usize,
+    warm: bool,
 ) -> Result<OpenMicrophone, handy_recorder::Error> {
-    match open_microphone(microphone_config(
-        device.clone(),
-        channel,
-        take_headset,
-        frames_per_chunk,
-    )) {
+    match open_microphone(
+        microphone_config(device.clone(), channel, take_headset, frames_per_chunk),
+        warm,
+    ) {
         Err(error) if error.kind() == ErrorKind::InvalidChannel => {
             warn!("{error}; averaging all input channels instead");
-            open_microphone(microphone_config(
-                device,
-                None,
-                take_headset,
-                frames_per_chunk,
-            ))
+            open_microphone(
+                microphone_config(device, None, take_headset, frames_per_chunk),
+                warm,
+            )
         }
         result => result,
     }
@@ -494,6 +485,7 @@ pub struct AudioRecordingManager {
     is_recording: Arc<Mutex<bool>>,
     mute_state: Arc<Mutex<MuteState>>,
     close_generation: Arc<AtomicU64>,
+    pub(crate) warm_input: Arc<Mutex<Option<WarmInput>>>,
     pub(crate) trailing_buffer: Arc<trailing_buffer::TrailingBuffer>,
     cancel_generation: Arc<AtomicU64>,
     /// Lock-free mirror of "is the state in {Recording, Stopping}",
@@ -552,6 +544,7 @@ impl AudioRecordingManager {
             is_recording: Arc::new(Mutex::new(false)),
             mute_state: Arc::new(Mutex::new(MuteState::default())),
             close_generation: Arc::new(AtomicU64::new(0)),
+            warm_input: Arc::default(),
             trailing_buffer: Arc::default(),
             cancel_generation: Arc::new(AtomicU64::new(0)),
             recording_active: Arc::new(AtomicBool::new(false)),
@@ -875,11 +868,14 @@ impl AudioRecordingManager {
         let channel = *self.selected_channel.lock().unwrap();
         let take_headset = self.airpods_mode.load(Ordering::Acquire);
         let open_started = Instant::now();
+        // AirPods' dedicated headset mode must still follow dictation start/stop.
+        let warm = cfg!(target_os = "macos") && settings.always_on_microphone && !take_headset;
         let microphone = match open_microphone_on_channel(
             resolution.device.clone(),
             channel,
             take_headset,
             frames_per_chunk,
+            warm,
         ) {
             Err(first_err) if resolution.from_cache => {
                 // The cached device ID may have gone stale (unplugged).
@@ -893,6 +889,7 @@ impl AudioRecordingManager {
                     channel,
                     take_headset,
                     frames_per_chunk,
+                    warm,
                 )
             }
             result => result,
@@ -903,6 +900,7 @@ impl AudioRecordingManager {
             vad_elapsed,
             open_started.elapsed()
         );
+        *self.warm_input.lock().unwrap() = microphone.recorder.input();
         *self.recorder.lock().unwrap() = Some(microphone);
 
         *open_flag = true;
@@ -947,6 +945,7 @@ impl AudioRecordingManager {
     /// Closes a microphone, first discarding any recording on it (its
     /// detector comes back).
     fn close_microphone(&self, microphone: OpenMicrophone) {
+        self.warm_input.lock().unwrap().take();
         let mut is_recording = self.is_recording.lock().unwrap();
         if *is_recording {
             let _ = self.collect_recording(&microphone);
@@ -988,7 +987,9 @@ impl AudioRecordingManager {
                 // The recording and its detector are lost with the sink.
                 error!("Failed to stop recording: {e}");
                 self.last_input_silent.store(false, Ordering::Release);
-                if e.kind() != ErrorKind::NotRecording {
+                if e.downcast_ref::<handy_recorder::Error>().map(|e| e.kind())
+                    != Some(ErrorKind::NotRecording)
+                {
                     microphone.failed.store(true, Ordering::Release);
                 }
                 *self.vad.lock().unwrap() = VadSlot::Unloaded;
@@ -1037,10 +1038,11 @@ impl AudioRecordingManager {
         );
     }
 
-    pub fn try_start_recording(
+    pub(crate) fn try_start_recording(
         &self,
         binding_id: &str,
         vad_policy: VadPolicy,
+        prepared: Option<Arc<WarmTake>>,
     ) -> Result<RecordingReadiness, anyhow::Error> {
         let mut state = self.state.lock().unwrap();
         if !matches!(*state, RecordingState::Idle) {
@@ -1079,7 +1081,7 @@ impl AudioRecordingManager {
                 self.return_vad(sink.into_vad());
                 return Err(anyhow::anyhow!("Recorder not available"));
             };
-            match microphone.recorder.start(sink) {
+            match microphone.recorder.start(sink, prepared.clone()) {
                 Ok(()) => {
                     let generation = self.capture_generation.fetch_add(1, Ordering::AcqRel) + 1;
                     *self.is_recording.lock().unwrap() = true;
@@ -1358,7 +1360,7 @@ mod tests {
             sample_rate: Some(0),
             ..RecorderConfig::speech()
         };
-        match Recorder::<CaptureSink>::open(config) {
+        match handy_recorder::Recorder::<CaptureSink>::open(config) {
             Err(error) => error,
             Ok(_) => panic!("a 0 Hz output rate should be rejected"),
         }
