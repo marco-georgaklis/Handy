@@ -87,6 +87,11 @@ impl WarmTake {
         }
     }
 
+    #[cfg(test)]
+    pub(super) fn queued_samples(&self) -> Vec<f32> {
+        self.state.lock().unwrap().blocks.concat()
+    }
+
     pub(super) fn attach(&self, mut sink: CaptureSink) {
         let mut state = self.state.lock().unwrap();
         for samples in state.blocks.drain(..) {
@@ -106,7 +111,7 @@ impl WarmTake {
         // A disconnected microphone may never deliver the final frame.
         let (mut state, _) = self
             .delivered
-            .wait_timeout_while(state, Duration::from_millis(100), |s| !s.drained)
+            .wait_timeout_while(state, Duration::from_millis(500), |s| !s.drained)
             .unwrap();
         state.drained = true;
         state
@@ -169,9 +174,19 @@ impl WarmInput {
     }
 }
 
-impl Sink for WarmInput {
-    fn process_chunk(&mut self, chunk: AudioChunk<'_>) {
-        let at = Instant::now();
+impl WarmInput {
+    pub(super) fn listening(&self) -> bool {
+        self.0
+            .lock()
+            .unwrap()
+            .takes
+            .iter()
+            .any(|take| take.strong_count() > 0)
+    }
+
+    pub(super) fn deliver_from_device(&self, chunk: AudioChunk<'_>, first: Instant) {
+        let end =
+            first + Duration::from_secs_f64(chunk.valid_frames as f64 / chunk.sample_rate as f64);
         let takes: Vec<_> = self
             .0
             .lock()
@@ -181,7 +196,7 @@ impl Sink for WarmInput {
             .filter_map(Weak::upgrade)
             .collect();
         for take in takes {
-            take.deliver(chunk, at);
+            take.deliver(chunk, end);
         }
     }
 }
@@ -189,6 +204,32 @@ impl Sink for WarmInput {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn delayed_device_blocks_are_routed_by_capture_time() {
+        let input = WarmInput::default();
+        let origin = Instant::now() - Duration::from_secs(1);
+        let at = |ms| origin + Duration::from_millis(ms);
+        let take = input.edge("ptt", true, at(12), Duration::ZERO).unwrap();
+        input.edge("ptt", false, at(16), Duration::ZERO);
+        // Both reach the app together, long after the physical release.
+        for (ms, value) in [(0, 1.), (10, 2.)] {
+            let data = [value; 10];
+            input.deliver_from_device(
+                AudioChunk {
+                    samples: &data,
+                    valid_frames: 10,
+                    channels: 1,
+                    sample_rate: 1000,
+                },
+                at(ms),
+            );
+        }
+        assert_eq!(
+            take.state.lock().unwrap().blocks.as_slice(),
+            &[vec![0., 0., 2., 2., 2., 2., 0., 0., 0., 0.]]
+        );
+    }
 
     #[test]
     fn two_held_intervals_keep_their_own_pcm_while_the_pipeline_drains() {
@@ -206,9 +247,7 @@ mod tests {
             channels: 1,
             valid_frames: 10,
         };
-        for take in [&first, &second] {
-            take.deliver(chunk, at(10));
-        }
+        input.deliver_from_device(chunk, at(0));
         assert_eq!(
             first.state.lock().unwrap().blocks[0],
             [0., 0., 3., 4., 5., 6., 0., 0., 0., 0.]

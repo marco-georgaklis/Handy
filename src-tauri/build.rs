@@ -25,6 +25,11 @@ fn main() {
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
         println!("cargo:rustc-link-arg=-Wl,-weak_framework,CoreAudio");
         link_clang_rt_osx();
+        cc::Build::new()
+            .file("src/managers/audio/warm_input.c")
+            .compile("warm_input");
+        println!("cargo:rustc-link-lib=framework=AudioToolbox");
+        println!("cargo:rerun-if-changed=src/managers/audio/warm_input.c");
     }
 
     // Stage transcribe-cpp's shared runtime libraries (and the dlopen'd ggml

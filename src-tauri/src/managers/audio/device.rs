@@ -6,8 +6,9 @@ use std::sync::{Arc, Mutex};
 
 pub(super) enum Device {
     Standard(Recorder<CaptureSink>),
+    #[cfg(target_os = "macos")]
     Warm {
-        recorder: Recorder<WarmInput>,
+        recorder: super::timed_input::TimedInput,
         input: WarmInput,
         active: Mutex<Option<Arc<WarmTake>>>,
     },
@@ -17,25 +18,49 @@ impl Device {
     pub fn open(
         config: RecorderConfig,
         warm: bool,
-        failed: impl FnOnce(Error) + Send + 'static,
+        failed: Arc<std::sync::atomic::AtomicBool>,
     ) -> Result<Self, Error> {
-        if warm {
-            let recorder = Recorder::open_with_failure_handler(config, failed)?;
+        #[cfg(target_os = "macos")]
+        if warm
+            && config.channels == handy_recorder::Channels::MixToMono
+            && handy_recorder::permission_status() != handy_recorder::Permission::Denied
+        {
             let input = WarmInput::default();
-            recorder.start(input.clone())?;
-            return Ok(Self::Warm {
-                recorder,
-                input,
-                active: Mutex::default(),
-            });
+            match super::timed_input::TimedInput::open(
+                input.clone(),
+                config.frames_per_chunk.unwrap_or(480),
+                config.device.as_deref(),
+                failed.clone(),
+            ) {
+                Ok(recorder) => {
+                    return Ok(Self::Warm {
+                        recorder,
+                        input,
+                        active: Mutex::default(),
+                    })
+                }
+                Err(error) => log::warn!(
+                    "Timestamped microphone unavailable; opening standard input: {error}"
+                ),
+            }
         }
         Ok(Self::Standard(Recorder::open_with_failure_handler(
-            config, failed,
+            config,
+            move |_| failed.store(true, std::sync::atomic::Ordering::Release),
         )?))
+    }
+
+    pub fn stalled(&self) -> bool {
+        #[cfg(target_os = "macos")]
+        if let Self::Warm { recorder, .. } = self {
+            return recorder.stalled();
+        }
+        false
     }
 
     pub fn input(&self) -> Option<WarmInput> {
         match self {
+            #[cfg(target_os = "macos")]
             Self::Warm { input, .. } => Some(input.clone()),
             Self::Standard(_) => None,
         }
@@ -48,6 +73,7 @@ impl Device {
     ) -> Result<(), StartError<CaptureSink>> {
         match self {
             Self::Standard(recorder) => recorder.start(sink),
+            #[cfg(target_os = "macos")]
             Self::Warm { input, active, .. } => {
                 let take = prepared
                     .filter(|take| input.contains(take))
@@ -64,6 +90,7 @@ impl Device {
     pub fn stop(&self) -> anyhow::Result<Stopped<CaptureSink>> {
         match self {
             Self::Standard(recorder) => Ok(recorder.stop()?),
+            #[cfg(target_os = "macos")]
             Self::Warm { active, .. } => {
                 let take = active
                     .lock()
@@ -82,7 +109,11 @@ impl Device {
     pub fn close(self) -> Result<(), Error> {
         match self {
             Self::Standard(recorder) => recorder.close(),
-            Self::Warm { recorder, .. } => recorder.close(),
+            #[cfg(target_os = "macos")]
+            Self::Warm { recorder, .. } => {
+                drop(recorder);
+                Ok(())
+            }
         }
     }
 }

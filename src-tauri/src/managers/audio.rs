@@ -14,6 +14,8 @@ use crate::utils;
 use handy_recorder::{Channels, EndReason, ErrorKind, RecorderConfig, StartError};
 use log::{debug, error, info, trace, warn};
 mod device;
+#[cfg(target_os = "macos")]
+mod timed_input;
 mod trailing_buffer;
 mod warm;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -298,14 +300,17 @@ enum VadSlot {
 /// An open microphone: the stream is running whether or not it is recording.
 struct OpenMicrophone {
     recorder: device::Device,
+    requested_warm: bool,
     /// Set when this recorder fails. Its own flag, so a failure handler that
     /// runs late can't mark a replacement recorder failed.
     failed: Arc<AtomicBool>,
 }
 
 impl OpenMicrophone {
-    fn needs_reopen(&self) -> bool {
-        self.failed.load(Ordering::Acquire)
+    fn needs_reopen(&self, warm: bool) -> bool {
+        self.requested_warm != warm
+            || self.failed.load(Ordering::Acquire)
+            || self.recorder.stalled()
     }
 }
 
@@ -407,13 +412,12 @@ fn open_microphone(
     warm: bool,
 ) -> Result<OpenMicrophone, handy_recorder::Error> {
     let failed = Arc::new(AtomicBool::new(false));
-    let recorder = device::Device::open(config, warm, {
-        let failed = Arc::clone(&failed);
-        // handy-recorder logs the failure. The stream is rebuilt on the next
-        // start; a recording in progress keeps the audio captured before it.
-        move |_| failed.store(true, Ordering::Release)
-    })?;
-    Ok(OpenMicrophone { recorder, failed })
+    let recorder = device::Device::open(config, warm, failed.clone())?;
+    Ok(OpenMicrophone {
+        recorder,
+        failed,
+        requested_warm: warm,
+    })
 }
 
 /// Opens with the selected channel, or averages all channels if the device
@@ -794,6 +798,9 @@ impl AudioRecordingManager {
     }
 
     pub fn start_microphone_stream(&self) -> Result<(), anyhow::Error> {
+        let settings = get_settings(&self.app_handle);
+        let take_headset = self.airpods_mode.load(Ordering::Acquire);
+        let warm = cfg!(target_os = "macos") && settings.always_on_microphone && !take_headset;
         let mut open_flag = self.is_open.lock().unwrap();
         if *open_flag {
             // `is_open` only records that we opened a stream, not that it is
@@ -805,7 +812,7 @@ impl AudioRecordingManager {
                 .lock()
                 .unwrap()
                 .as_ref()
-                .is_none_or(OpenMicrophone::needs_reopen);
+                .is_none_or(|mic| mic.needs_reopen(warm));
 
             if !needs_reopen {
                 // trace, not debug: with the aliveness check in
@@ -854,7 +861,6 @@ impl AudioRecordingManager {
         // No pre-flight enumeration here: when nothing is configured the
         // recorder resolves the system default itself, and a machine with no
         // input devices at all fails inside open() with `DeviceUnavailable`.
-        let settings = get_settings(&self.app_handle);
         let resolve_started = Instant::now();
         let mut resolution = self.resolve_microphone_device(&settings);
         let resolve_elapsed = resolve_started.elapsed();
@@ -866,10 +872,7 @@ impl AudioRecordingManager {
         let vad_elapsed = vad_started.elapsed();
 
         let channel = *self.selected_channel.lock().unwrap();
-        let take_headset = self.airpods_mode.load(Ordering::Acquire);
         let open_started = Instant::now();
-        // AirPods' dedicated headset mode must still follow dictation start/stop.
-        let warm = cfg!(target_os = "macos") && settings.always_on_microphone && !take_headset;
         let microphone = match open_microphone_on_channel(
             resolution.device.clone(),
             channel,
@@ -1012,7 +1015,9 @@ impl AudioRecordingManager {
             }
             (MicrophoneMode::OnDemand, MicrophoneMode::AlwaysOn) => {
                 self.close_generation.fetch_add(1, Ordering::SeqCst);
-                self.start_microphone_stream()?;
+                if matches!(*self.state.lock().unwrap(), RecordingState::Idle) {
+                    self.start_microphone_stream()?;
+                }
             }
             _ => {}
         }
@@ -1277,14 +1282,7 @@ impl AudioRecordingManager {
                 *self.is_recording.lock().unwrap() = false;
                 self.set_state(&mut self.state.lock().unwrap(), RecordingState::Idle);
 
-                // In on-demand mode, close the mic (lazily if the setting is enabled)
-                if matches!(*self.mode.lock().unwrap(), MicrophoneMode::OnDemand) {
-                    if get_settings(&self.app_handle).lazy_stream_close {
-                        self.schedule_lazy_close();
-                    } else {
-                        self.stop_microphone_stream();
-                    }
-                }
+                self.rearm_after_take();
 
                 if self.was_cancelled_since(cancel_generation) {
                     debug!("Recording stop cancelled; discarding captured samples");
@@ -1305,6 +1303,21 @@ impl AudioRecordingManager {
             _ => None,
         }
     }
+    fn rearm_after_take(&self) {
+        let mode = self.mode.lock().unwrap().clone();
+        match mode {
+            MicrophoneMode::AlwaysOn => {
+                if let Err(error) = self.start_microphone_stream() {
+                    warn!("Could not rearm warm input: {error}");
+                }
+            }
+            MicrophoneMode::OnDemand if get_settings(&self.app_handle).lazy_stream_close => {
+                self.schedule_lazy_close()
+            }
+            MicrophoneMode::OnDemand => self.stop_microphone_stream(),
+        }
+    }
+
     pub fn is_recording(&self) -> bool {
         // Lock-free: mirrors the `state` {Recording, Stopping} membership via
         // an atomic maintained by `set_state()`. Polled from the webview/main
@@ -1332,14 +1345,7 @@ impl AudioRecordingManager {
 
                 *self.is_recording.lock().unwrap() = false;
 
-                // In on-demand mode, close the mic (lazily if the setting is enabled)
-                if matches!(*self.mode.lock().unwrap(), MicrophoneMode::OnDemand) {
-                    if get_settings(&self.app_handle).lazy_stream_close {
-                        self.schedule_lazy_close();
-                    } else {
-                        self.stop_microphone_stream();
-                    }
-                }
+                self.rearm_after_take();
             }
             RecordingState::Stopping => {
                 debug!("Cancellation requested while recording is stopping");
