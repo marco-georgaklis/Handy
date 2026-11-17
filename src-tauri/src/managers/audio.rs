@@ -249,7 +249,7 @@ pub enum RecordingState {
     Stopping,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MicrophoneMode {
     AlwaysOn,
     OnDemand,
@@ -1004,25 +1004,19 @@ impl AudioRecordingManager {
     /* ---------- mode switching --------------------------------------------- */
 
     pub fn update_mode(&self, new_mode: MicrophoneMode) -> Result<(), anyhow::Error> {
-        let cur_mode = self.mode.lock().unwrap().clone();
-
-        match (cur_mode, &new_mode) {
-            (MicrophoneMode::AlwaysOn, MicrophoneMode::OnDemand) => {
-                if matches!(*self.state.lock().unwrap(), RecordingState::Idle) {
-                    self.close_generation.fetch_add(1, Ordering::SeqCst);
-                    self.stop_microphone_stream();
-                }
-            }
-            (MicrophoneMode::OnDemand, MicrophoneMode::AlwaysOn) => {
-                self.close_generation.fetch_add(1, Ordering::SeqCst);
-                if matches!(*self.state.lock().unwrap(), RecordingState::Idle) {
-                    self.start_microphone_stream()?;
-                }
-            }
-            _ => {}
+        // Mode publication, idle checks, and stream changes share the same
+        // lock as stop, cancel, start, and the lazy-close timer.
+        let state = self.state.lock().unwrap();
+        let previous = std::mem::replace(&mut *self.mode.lock().unwrap(), new_mode.clone());
+        if previous != new_mode {
+            self.close_generation.fetch_add(1, Ordering::SeqCst);
         }
-
-        *self.mode.lock().unwrap() = new_mode;
+        if matches!(*state, RecordingState::Idle) {
+            match new_mode {
+                MicrophoneMode::AlwaysOn => self.start_microphone_stream()?,
+                MicrophoneMode::OnDemand => self.stop_microphone_stream(),
+            }
+        }
         Ok(())
     }
 
@@ -1279,10 +1273,7 @@ impl AudioRecordingManager {
                     }
                 };
 
-                *self.is_recording.lock().unwrap() = false;
-                self.set_state(&mut self.state.lock().unwrap(), RecordingState::Idle);
-
-                self.rearm_after_take();
+                self.finish_take(&mut self.state.lock().unwrap());
 
                 if self.was_cancelled_since(cancel_generation) {
                     debug!("Recording stop cancelled; discarding captured samples");
@@ -1303,7 +1294,8 @@ impl AudioRecordingManager {
             _ => None,
         }
     }
-    fn rearm_after_take(&self) {
+    fn finish_take(&self, state: &mut std::sync::MutexGuard<'_, RecordingState>) {
+        *self.is_recording.lock().unwrap() = false;
         let mode = self.mode.lock().unwrap().clone();
         match mode {
             MicrophoneMode::AlwaysOn => {
@@ -1316,6 +1308,7 @@ impl AudioRecordingManager {
             }
             MicrophoneMode::OnDemand => self.stop_microphone_stream(),
         }
+        self.set_state(state, RecordingState::Idle);
     }
 
     pub fn is_recording(&self) -> bool {
@@ -1336,16 +1329,11 @@ impl AudioRecordingManager {
 
         match *state {
             RecordingState::Recording { .. } => {
-                self.set_state(&mut state, RecordingState::Idle);
-                drop(state);
-
                 if let Some(microphone) = self.recorder.lock().unwrap().as_ref() {
                     let _ = self.collect_recording(microphone); // Discard the result
                 }
 
-                *self.is_recording.lock().unwrap() = false;
-
-                self.rearm_after_take();
+                self.finish_take(&mut state);
             }
             RecordingState::Stopping => {
                 debug!("Cancellation requested while recording is stopping");
