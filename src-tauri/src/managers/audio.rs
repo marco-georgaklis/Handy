@@ -13,6 +13,7 @@ use crate::settings::{get_settings, write_settings, AppSettings, VadBackend};
 use crate::utils;
 use handy_recorder::{Channels, EndReason, ErrorKind, Recorder, RecorderConfig, StartError};
 use log::{debug, error, info, trace, warn};
+mod trailing_buffer;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -493,6 +494,7 @@ pub struct AudioRecordingManager {
     is_recording: Arc<Mutex<bool>>,
     mute_state: Arc<Mutex<MuteState>>,
     close_generation: Arc<AtomicU64>,
+    pub(crate) trailing_buffer: Arc<trailing_buffer::TrailingBuffer>,
     cancel_generation: Arc<AtomicU64>,
     /// Lock-free mirror of "is the state in {Recording, Stopping}",
     /// maintained by `set_state()`. The hot-path `is_recording()` reads THIS
@@ -550,6 +552,7 @@ impl AudioRecordingManager {
             is_recording: Arc::new(Mutex::new(false)),
             mute_state: Arc::new(Mutex::new(MuteState::default())),
             close_generation: Arc::new(AtomicU64::new(0)),
+            trailing_buffer: Arc::default(),
             cancel_generation: Arc::new(AtomicU64::new(0)),
             recording_active: Arc::new(AtomicBool::new(false)),
             capture_generation: Arc::new(AtomicU64::new(0)),
@@ -1044,6 +1047,7 @@ impl AudioRecordingManager {
             return Err(anyhow::anyhow!("Already recording"));
         }
 
+        self.trailing_buffer.reset();
         // Cancel any pending lazy close (no-op in always-on mode, where
         // closes are never scheduled).
         self.close_generation.fetch_add(1, Ordering::SeqCst);
@@ -1256,23 +1260,8 @@ impl AudioRecordingManager {
                 // This is only the explicit user setting; streaming VAD must not add
                 // hidden post-release capture time.
                 let settings = get_settings(&self.app_handle);
-                let buffer_ms = settings.extra_recording_buffer_ms;
-                if buffer_ms > 0 {
-                    debug!(
-                        "Extra recording buffer: sleeping {}ms before stopping",
-                        buffer_ms
-                    );
-                    let started = Instant::now();
-                    let buffer = Duration::from_millis(buffer_ms);
-                    while started.elapsed() < buffer {
-                        if self.was_cancelled_since(cancel_generation) {
-                            debug!("Recording stop cancelled during extra buffer");
-                            break;
-                        }
-                        let remaining = buffer.saturating_sub(started.elapsed());
-                        std::thread::sleep(remaining.min(Duration::from_millis(25)));
-                    }
-                }
+                self.trailing_buffer
+                    .wait(settings.extra_recording_buffer_ms);
 
                 let samples = match self.recorder.lock().unwrap().as_ref() {
                     Some(microphone) => self.collect_recording(microphone),
@@ -1326,6 +1315,7 @@ impl AudioRecordingManager {
     /// Cancel any ongoing recording without returning audio samples
     pub fn cancel_recording(&self) {
         self.invalidate_recording_readiness();
+        self.trailing_buffer.interrupt();
         self.cancel_generation.fetch_add(1, Ordering::AcqRel);
         let mut state = self.state.lock().unwrap();
 

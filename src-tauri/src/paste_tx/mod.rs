@@ -172,12 +172,17 @@ const CHORD_HOLD_MS: u64 = 100;
 pub(crate) fn send_chord(
     enigo: &mut enigo::Enigo,
     paste_method: &crate::settings::PasteMethod,
+    dest: crate::input::PasteDestination,
 ) -> Result<(), String> {
     use crate::settings::PasteMethod;
     match paste_method {
-        PasteMethod::CtrlV => crate::input::send_paste_ctrl_v(enigo, CHORD_HOLD_MS),
-        PasteMethod::CtrlShiftV => crate::input::send_paste_ctrl_shift_v(enigo, CHORD_HOLD_MS),
-        PasteMethod::ShiftInsert => crate::input::send_paste_shift_insert(enigo, CHORD_HOLD_MS),
+        PasteMethod::CtrlV => crate::input::send_paste_ctrl_v(enigo, CHORD_HOLD_MS, dest),
+        PasteMethod::CtrlShiftV => {
+            crate::input::send_paste_ctrl_shift_v(enigo, CHORD_HOLD_MS, dest)
+        }
+        PasteMethod::ShiftInsert => {
+            crate::input::send_paste_shift_insert(enigo, CHORD_HOLD_MS, dest)
+        }
         other => Err(format!(
             "Invalid paste method for clipboard paste: {:?}",
             other
@@ -196,15 +201,17 @@ pub(crate) fn try_reliable_paste(
     app_handle: &tauri::AppHandle,
     paste_method: &crate::settings::PasteMethod,
     enigo: &mut enigo::Enigo,
+    dest: crate::input::PasteDestination,
     auto_submit: bool,
     auto_submit_key: crate::settings::AutoSubmitKey,
     clipboard_handling: crate::settings::ClipboardHandling,
-) -> Result<std::sync::mpsc::Receiver<()>, String> {
+) -> Result<std::sync::mpsc::Receiver<Result<(), String>>, String> {
     platform::run(
         text,
         app_handle,
         paste_method,
         enigo,
+        dest,
         auto_submit,
         auto_submit_key,
         clipboard_handling,

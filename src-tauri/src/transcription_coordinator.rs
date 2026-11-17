@@ -1,3 +1,4 @@
+mod drain;
 use crate::actions::ACTION_MAP;
 use crate::managers::audio::AudioRecordingManager;
 use crate::settings::ShortcutActivation;
@@ -198,6 +199,7 @@ enum Effect {
 
 /// Commands processed sequentially by the coordinator thread.
 enum Command {
+    GraceExpired,
     Input(InputEvent),
     Cancel,
     ProcessingFinished,
@@ -580,33 +582,27 @@ impl TranscriptionCoordinator {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let mut state = CoordinatorState::new();
 
+                let mut drain = drain::DrainInputs::default();
                 loop {
-                    let cmd = if let Some(deadline) = state.grace_deadline() {
-                        match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-                            Ok(cmd) => cmd,
-                            Err(mpsc::RecvTimeoutError::Timeout) => {
-                                let was_locked = state.is_recording_locked();
-                                if let Some(effect) = state.on_grace_expired() {
-                                    run_effect(&app, &mut state, effect);
-                                }
-                                if !was_locked && state.is_recording_locked() {
-                                    emit_recording_phase(&app, RecordingPhase::Locked);
-                                }
-                                continue;
-                            }
-                            Err(mpsc::RecvTimeoutError::Disconnected) => break,
-                        }
-                    } else {
-                        match rx.recv() {
-                            Ok(cmd) => cmd,
-                            Err(_) => break,
-                        }
+                    let Some((cmd, at)) = drain.receive(&rx, &state) else {
+                        break;
                     };
-
+                    let Some(cmd) = drain.accept(cmd, at, &state.stage, || {
+                        app.state::<Arc<AudioRecordingManager>>()
+                            .trailing_buffer
+                            .interrupt()
+                    }) else {
+                        continue;
+                    };
                     let was_locked = state.is_recording_locked();
                     match cmd {
+                        Command::GraceExpired => {
+                            if let Some(effect) = state.on_grace_expired() {
+                                run_effect(&app, &mut state, effect);
+                            }
+                        }
                         Command::Input(input) => {
-                            let effect = state.on_input(input, Instant::now());
+                            let effect = state.on_input(input, at);
                             // macOS reports physical releases; only X11 needs repeat grace.
                             #[cfg(target_os = "macos")]
                             let effect = effect.or_else(|| state.on_grace_expired());

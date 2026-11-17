@@ -1,4 +1,4 @@
-use crate::input::{self, EnigoState};
+use crate::input::{self, EnigoState, PasteDestination};
 #[cfg(target_os = "linux")]
 use crate::settings::TypingTool;
 use crate::settings::{get_settings, ClipboardHandling, PasteMethod};
@@ -75,6 +75,7 @@ fn paste_via_clipboard(
     text: &str,
     app_handle: &AppHandle,
     paste_method: &PasteMethod,
+    dest: PasteDestination,
     paste_delay_ms: u64,
     paste_delay_after_ms: u64,
 ) -> Result<(), String> {
@@ -110,9 +111,9 @@ fn paste_via_clipboard(
             with_enigo(app_handle, move |enigo| match paste_method {
                 // The legacy path cannot detect a mistimed chord, so it keeps the
                 // conservative 100ms modifier hold.
-                PasteMethod::CtrlV => input::send_paste_ctrl_v(enigo, 100),
-                PasteMethod::CtrlShiftV => input::send_paste_ctrl_shift_v(enigo, 100),
-                PasteMethod::ShiftInsert => input::send_paste_shift_insert(enigo, 100),
+                PasteMethod::CtrlV => input::send_paste_ctrl_v(enigo, 100, dest),
+                PasteMethod::CtrlShiftV => input::send_paste_ctrl_shift_v(enigo, 100, dest),
+                PasteMethod::ShiftInsert => input::send_paste_shift_insert(enigo, 100, dest),
                 _ => Err("Invalid paste method for clipboard paste".into()),
             })?;
         }
@@ -754,6 +755,7 @@ fn paste_via_external_script(text: &str, script_path: &str) -> Result<(), String
 fn paste_direct(
     text: &str,
     app_handle: &AppHandle,
+    dest: PasteDestination,
     #[cfg(target_os = "linux")] typing_tool: TypingTool,
 ) -> Result<(), String> {
     #[cfg(target_os = "linux")]
@@ -766,6 +768,7 @@ fn paste_direct(
 
     let text = text.to_string();
     with_enigo(app_handle, move |enigo| {
+        dest.validate()?;
         input::paste_text_direct(enigo, &text)
     })
 }
@@ -779,6 +782,10 @@ fn should_send_auto_submit(auto_submit: bool, paste_method: PasteMethod) -> bool
 /// Pastes `text` into the focused app. Call from a worker thread, never the main
 /// thread: it sleeps between steps (input injection hops via `with_enigo`).
 pub fn paste(text: String, app_handle: AppHandle) -> Result<(), String> {
+    paste_to(text, app_handle, PasteDestination::focused())
+}
+
+pub fn paste_to(text: String, app_handle: AppHandle, dest: PasteDestination) -> Result<(), String> {
     let _paste = PASTE_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
     let settings = get_settings(&app_handle);
     let paste_method = settings.paste_method;
@@ -806,6 +813,7 @@ pub fn paste(text: String, app_handle: AppHandle) -> Result<(), String> {
             paste_direct(
                 &text,
                 &app_handle,
+                dest,
                 #[cfg(target_os = "linux")]
                 settings.typing_tool,
             )?;
@@ -831,6 +839,7 @@ pub fn paste(text: String, app_handle: AppHandle) -> Result<(), String> {
                         &app,
                         &paste_method,
                         enigo,
+                        dest,
                         auto_submit,
                         auto_submit_key,
                         clipboard_handling,
@@ -842,7 +851,7 @@ pub fn paste(text: String, app_handle: AppHandle) -> Result<(), String> {
                         // the pasteboard promise while holding this dictation's output turn.
                         return settled
                             .recv()
-                            .map_err(|_| "Clipboard settlement interrupted".into());
+                            .map_err(|_| "Clipboard settlement interrupted".to_string())?;
                     }
                     Err(e) => {
                         log::warn!("Reliable paste unavailable ({e}); falling back to legacy paste")
@@ -853,6 +862,7 @@ pub fn paste(text: String, app_handle: AppHandle) -> Result<(), String> {
                 &text,
                 &app_handle,
                 &paste_method,
+                dest,
                 paste_delay_ms,
                 paste_delay_after_ms,
             )?
@@ -863,6 +873,7 @@ pub fn paste(text: String, app_handle: AppHandle) -> Result<(), String> {
                 .as_ref()
                 .filter(|p| !p.is_empty())
                 .ok_or("External script path is not configured")?;
+            dest.validate()?;
             paste_via_external_script(&text, script_path)?;
         }
     }
@@ -871,7 +882,7 @@ pub fn paste(text: String, app_handle: AppHandle) -> Result<(), String> {
         std::thread::sleep(Duration::from_millis(50));
         let auto_submit_key = settings.auto_submit_key;
         if let Err(error) = with_enigo(&app_handle, move |enigo| {
-            send_return_key(enigo, auto_submit_key)
+            send_return_key(enigo, auto_submit_key, dest)
         }) {
             log::warn!("Paste succeeded, but auto-submit failed: {error}");
         }

@@ -25,8 +25,28 @@ impl DictationSession {
         Arc::clone(&CURRENT.lock().unwrap())
     }
 
+    #[cfg(test)]
     pub(super) fn is_current(self: &Arc<Self>) -> bool {
         Arc::ptr_eq(self, &CURRENT.lock().unwrap())
+    }
+
+    pub(super) fn when_current(self: &Arc<Self>, f: impl FnOnce()) {
+        let owner = CURRENT.lock().unwrap();
+        if Arc::ptr_eq(self, &owner) && !self.is_cancelled() {
+            f();
+        }
+    }
+
+    pub(super) fn notice(self: &Arc<Self>, app: &AppHandle, notice: crate::notices::Notice) {
+        let owner = CURRENT.lock().unwrap();
+        if self.is_cancelled() {
+            return;
+        }
+        if Arc::ptr_eq(self, &owner) {
+            crate::notices::raise(app, notice);
+        } else {
+            crate::notices::raise_previous_dictation(app, notice);
+        }
     }
 
     pub(super) fn begin_decode(&self) -> bool {
@@ -39,10 +59,10 @@ impl DictationSession {
     }
 
     pub(super) fn hide_if_current(self: &Arc<Self>, app: &AppHandle) {
-        if self.is_current() {
+        self.when_current(|| {
             utils::hide_recording_overlay(app);
             set_tray_state(app, TrayIconState::Idle);
-        }
+        });
     }
 }
 
@@ -76,6 +96,7 @@ pub(super) async fn wait_for_output(previous: Option<watch::Receiver<()>>) {
 
 pub(super) struct PasteOutput {
     pub app: AppHandle,
+    pub destination: crate::input::PasteDestination,
     pub session: Arc<DictationSession>,
     pub sample_count: usize,
     pub stop_time: std::time::Instant,
@@ -93,7 +114,7 @@ impl PasteOutput {
         }
         crate::overlay::set_last_output(&text);
         let started = std::time::Instant::now();
-        let (outcome, notice) = match utils::paste(text, self.app.clone()) {
+        let (outcome, notice) = match utils::paste_to(text, self.app.clone(), self.destination) {
             Ok(()) => {
                 log::info!(
                     "dictation timing: audio={:.2}s transcribe={}ms post_process={}ms paste={}ms total={}ms",
@@ -112,16 +133,17 @@ impl PasteOutput {
                 (TranscriptionOutcome::Failed, Some(NoticeCode::PasteFailed))
             }
         };
-        if !self.session.is_current() || self.session.is_cancelled() {
-            return;
-        }
         if let Some(code) = notice {
-            notices::raise(&self.app, Notice::new(code, NoticeSource::Dictation));
-        } else {
-            notices::clear(&self.app, NoticeSource::Dictation);
-            crate::overlay::show_done_overlay(&self.app);
+            self.session
+                .notice(&self.app, Notice::new(code, NoticeSource::Dictation));
         }
-        set_tray_state(&self.app, TrayIconState::Idle);
+        self.session.when_current(|| {
+            if notice.is_none() {
+                notices::clear(&self.app, NoticeSource::Dictation);
+                crate::overlay::show_done_overlay(&self.app);
+            }
+            set_tray_state(&self.app, TrayIconState::Idle);
+        });
         self.session
             .complete(&self.app, outcome, self.sample_count, self.stop_time);
     }

@@ -106,7 +106,11 @@ fn send_auto_submit(shared: &WinTxShared) {
     if let Some(enigo_state) = shared.app_handle.try_state::<EnigoState>() {
         match enigo_state.0.try_lock() {
             Ok(mut enigo) => {
-                let _ = send_return_key(&mut enigo, shared.auto_submit_key);
+                let _ = send_return_key(
+                    &mut enigo,
+                    shared.auto_submit_key,
+                    crate::input::PasteDestination::focused(),
+                );
             }
             Err(_) => warn!("[reliable-paste] skipping auto-submit: input state busy"),
         }
@@ -532,6 +536,11 @@ fn pump_thread(shared: Arc<WinTxShared>, ready: Sender<Result<(), String>>) {
             Arc::into_raw(shared.clone()) as *const _ as isize,
         );
 
+        if SetTimer(Some(hwnd), TIMER_ID, TIMER_INTERVAL_MS, None) == 0 {
+            destroy_window_and_shared(hwnd);
+            let _ = ready.send(Err("Could not start clipboard settlement timer".into()));
+            return;
+        }
         let published = match snapshot_clipboard(hwnd, &shared) {
             Ok(()) => match publish(hwnd) {
                 Ok(sequence) => Ok(sequence),
@@ -558,7 +567,6 @@ fn pump_thread(shared: Arc<WinTxShared>, ready: Sender<Result<(), String>>) {
         if let Ok(mut slot) = PENDING.lock() {
             *slot = Some(shared.clone());
         }
-        let _ = SetTimer(Some(hwnd), TIMER_ID, TIMER_INTERVAL_MS, None);
         let _ = ready.send(Ok(()));
 
         let mut msg = MSG::default();
@@ -576,10 +584,11 @@ pub(super) fn run(
     app_handle: &tauri::AppHandle,
     paste_method: &PasteMethod,
     enigo: &mut enigo::Enigo,
+    dest: crate::input::PasteDestination,
     auto_submit: bool,
     auto_submit_key: AutoSubmitKey,
     clipboard_handling: ClipboardHandling,
-) -> Result<std::sync::mpsc::Receiver<()>, String> {
+) -> Result<std::sync::mpsc::Receiver<Result<(), String>>, String> {
     let shared = Arc::new(WinTxShared {
         state: Mutex::new(TxState::new()),
         text: text.to_string(),
@@ -596,8 +605,13 @@ pub(super) fn run(
     let shared_for_pump = shared.clone();
     let (done, settled) = std::sync::mpsc::channel();
     thread::spawn(move || {
-        pump_thread(shared_for_pump, ready_tx);
-        let _ = done.send(());
+        pump_thread(shared_for_pump.clone(), ready_tx);
+        let result = if shared_for_pump.state.lock().unwrap().injection_failed {
+            Err("Paste chord injection failed".into())
+        } else {
+            Ok(())
+        };
+        let _ = done.send(result);
     });
 
     // Wait until the transcript is actually published (or the worker reports
@@ -612,7 +626,7 @@ pub(super) fn run(
     // Mark injection *before* sending: enigo holds the chord for ~100ms and a
     // fast target may legitimately read while the chord is still held.
     shared.state.lock().unwrap().injected_at = Some(Instant::now());
-    match send_chord(enigo, paste_method) {
+    match send_chord(enigo, paste_method, dest) {
         Ok(()) => {
             info!("[reliable-paste] paste chord sent ({paste_method:?})");
         }

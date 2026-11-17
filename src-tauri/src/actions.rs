@@ -57,18 +57,17 @@ impl DictationSession {
         sample_count: usize,
         stop_time: Instant,
     ) {
-        if !self.is_current() || self.is_cancelled() {
-            return;
-        }
-        let event = TranscriptionCompleteEvent {
-            outcome,
-            audio_seconds: sample_count as f64
-                / crate::audio_toolkit::constants::WHISPER_SAMPLE_RATE as f64,
-            wait_seconds: stop_time.elapsed().as_secs_f64(),
-        };
-        if let Err(e) = event.emit(app) {
-            warn!("Failed to emit transcription complete: {e}");
-        }
+        self.when_current(|| {
+            let event = TranscriptionCompleteEvent {
+                outcome,
+                audio_seconds: sample_count as f64
+                    / crate::audio_toolkit::constants::WHISPER_SAMPLE_RATE as f64,
+                wait_seconds: stop_time.elapsed().as_secs_f64(),
+            };
+            if let Err(e) = event.emit(app) {
+                warn!("Failed to emit transcription complete: {e}");
+            }
+        });
     }
 }
 
@@ -616,7 +615,6 @@ impl ShortcutAction for TranscribeAction {
         }
 
         let binding_id = binding_id.to_string();
-        DictationSession::begin();
         let settings = get_settings(app);
 
         let selected_model_info = app
@@ -653,6 +651,7 @@ impl ShortcutAction for TranscribeAction {
         let recording_start_time = Instant::now();
         match rm.try_start_recording(&binding_id, vad_policy) {
             Ok(readiness) => {
+                DictationSession::begin();
                 debug!(
                     "Microphone armed in {:?} from shortcut action start (capture request {:?}, model kickoff {:?})",
                     start_time.elapsed(), recording_start_time.elapsed(), kickoff_elapsed
@@ -737,6 +736,7 @@ impl ShortcutAction for TranscribeAction {
         shortcut::unregister_cancel_shortcut(app);
 
         let stop_time = Instant::now();
+        let destination = crate::input::PasteDestination::focused();
         debug!("TranscribeAction::stop called for binding: {}", binding_id);
 
         let ah = app.clone();
@@ -828,8 +828,8 @@ impl ShortcutAction for TranscribeAction {
 
                     // Overlapping takes buffer their PCM. A previous take may have
                     // unloaded the engine under the user's immediate-unload setting.
-                    if !tm.is_model_loaded() {
-                        tm.initiate_model_load(true);
+                    if live.is_none() {
+                        tm.initiate_model_load(false);
                     }
                     let transcription_time = Instant::now();
                     let transcription_result = tm.transcribe_recording(samples, live);
@@ -880,12 +880,14 @@ impl ShortcutAction for TranscribeAction {
                             );
                             let transcribed_at = stop_time.elapsed();
 
-                            if post_process && session.is_current() {
-                                if use_streaming_overlay {
-                                    tm.emit_stream_working(StreamWorkKind::Polishing);
-                                } else {
-                                    show_processing_overlay(&ah);
-                                }
+                            if post_process {
+                                session.when_current(|| {
+                                    if use_streaming_overlay {
+                                        tm.emit_stream_working(StreamWorkKind::Polishing);
+                                    } else {
+                                        show_processing_overlay(&ah);
+                                    }
+                                });
                             }
                             let Some(processed) = complete_unless_cancelled(
                                 process_transcription_output(&ah, &transcription, post_process),
@@ -943,6 +945,7 @@ impl ShortcutAction for TranscribeAction {
                                 );
                             } else {
                                 let output = session::PasteOutput {
+                                    destination,
                                     app: ah.clone(),
                                     session: Arc::clone(&session),
                                     sample_count,
@@ -979,16 +982,14 @@ impl ShortcutAction for TranscribeAction {
                             }
 
                             error!("Transcription failed: {}", err);
-                            if session.is_current() {
-                                notices::raise(
-                                    &ah,
-                                    Notice::new(
-                                        NoticeCode::TranscriptionFailed,
-                                        NoticeSource::Dictation,
-                                    )
-                                    .with_detail(err.to_string()),
-                                );
-                            }
+                            session.notice(
+                                &ah,
+                                Notice::new(
+                                    NoticeCode::TranscriptionFailed,
+                                    NoticeSource::Dictation,
+                                )
+                                .with_detail(err.to_string()),
+                            );
                             // Save entry with empty text so user can retry
                             if wav_saved {
                                 if let Err(save_err) = hm.save_entry(
@@ -1002,9 +1003,7 @@ impl ShortcutAction for TranscribeAction {
                                     error!("Failed to save failed history entry: {}", save_err);
                                 }
                             }
-                            if session.is_current() {
-                                set_tray_state(&ah, TrayIconState::Idle);
-                            }
+                            session.when_current(|| set_tray_state(&ah, TrayIconState::Idle));
                             session.complete(
                                 &ah,
                                 TranscriptionOutcome::Failed,

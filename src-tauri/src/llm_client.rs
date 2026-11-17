@@ -226,7 +226,10 @@ struct ProviderClient {
 
 impl ProviderClient {
     fn post(&self, url: &str) -> reqwest::RequestBuilder {
-        self.client.post(url).headers(self.headers.clone())
+        self.client
+            .post(url)
+            .headers(self.headers.clone())
+            .timeout(Duration::from_secs(60))
     }
 
     fn get(&self, url: &str) -> reqwest::RequestBuilder {

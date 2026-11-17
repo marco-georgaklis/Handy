@@ -99,6 +99,7 @@ struct MacPending {
     saved_image: Option<tauri::image::Image<'static>>,
     change_count: NSInteger,
     provider: Option<Retained<HandyPasteProvider>>,
+    dest: crate::input::PasteDestination,
     auto_submit: bool,
     auto_submit_key: AutoSubmitKey,
     /// ClipboardHandling::CopyToClipboard — instead of restoring, settle by
@@ -142,12 +143,12 @@ fn settle(
     if p.auto_submit && receipt_seen {
         match enigo {
             Some(e) => {
-                let _ = send_return_key(e, p.auto_submit_key);
+                let _ = send_return_key(e, p.auto_submit_key, p.dest);
             }
             None => {
                 if let Some(enigo_state) = app_handle.try_state::<EnigoState>() {
                     if let Ok(mut e) = enigo_state.0.lock() {
-                        let _ = send_return_key(&mut e, p.auto_submit_key);
+                        let _ = send_return_key(&mut e, p.auto_submit_key, p.dest);
                     }
                 }
             }
@@ -196,7 +197,7 @@ fn flush_pending(app_handle: &AppHandle, enigo: &mut enigo::Enigo) {
 fn spawn_waiter(
     pending: Arc<Mutex<MacPending>>,
     app_handle: AppHandle,
-    done: std::sync::mpsc::Sender<()>,
+    done: std::sync::mpsc::Sender<Result<(), String>>,
 ) {
     thread::spawn(move || {
         let outcome = loop {
@@ -244,7 +245,11 @@ fn spawn_waiter(
         let app_for_finish = app_handle.clone();
         let _ = app_handle.run_on_main_thread(move || {
             settle(&pending_for_finish, &app_for_finish, None);
-            let _ = done.send(());
+            let _ = done.send(if injection_failed {
+                Err("Paste chord injection failed".into())
+            } else {
+                Ok(())
+            });
             if let Ok(mut slot) = PENDING.lock() {
                 let is_us = slot
                     .as_ref()
@@ -263,10 +268,11 @@ pub(super) fn run(
     app_handle: &AppHandle,
     paste_method: &PasteMethod,
     enigo: &mut enigo::Enigo,
+    dest: crate::input::PasteDestination,
     auto_submit: bool,
     auto_submit_key: AutoSubmitKey,
     clipboard_handling: ClipboardHandling,
-) -> Result<std::sync::mpsc::Receiver<()>, String> {
+) -> Result<std::sync::mpsc::Receiver<Result<(), String>>, String> {
     // Settle any previous transaction first so the snapshot below captures the
     // user's original clipboard, not the previous transcript.
     flush_pending(app_handle, enigo);
@@ -306,7 +312,7 @@ pub(super) fn run(
     if let Ok(mut st) = state.lock() {
         st.injected_at = Some(Instant::now());
     }
-    match send_chord(enigo, paste_method) {
+    match send_chord(enigo, paste_method, dest) {
         Ok(()) => {
             info!("[reliable-paste] paste chord sent ({paste_method:?})");
         }
@@ -326,6 +332,7 @@ pub(super) fn run(
         saved_image,
         change_count,
         provider: Some(provider),
+        dest,
         auto_submit,
         auto_submit_key,
         preserve_transcript: clipboard_handling == ClipboardHandling::CopyToClipboard,

@@ -176,6 +176,18 @@ pub fn raise_without_overlay(app: &AppHandle, notice: Notice) {
     tray::refresh_tray_icon(app);
 }
 
+/// Report an older take without covering a newer failure or recording overlay.
+pub fn raise_previous_dictation(app: &AppHandle, notice: Notice) {
+    let store = app.state::<NoticeStore>();
+    let mut active = store.lock();
+    if !active.iter().any(|n| n.source == notice.source) {
+        insert(&mut active, notice.clone());
+    }
+    publish(app, &active, Some(notice));
+    drop(active);
+    tray::refresh_tray_icon(app);
+}
+
 /// Call when `source` next succeeds, before raising anything about that run.
 pub fn clear(app: &AppHandle, source: NoticeSource) {
     clear_matching(app, source, None);
