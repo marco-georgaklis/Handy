@@ -2465,6 +2465,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "clap",
+ "core-graphics 0.25.0",
  "earshot",
  "enigo",
  "env_filter",

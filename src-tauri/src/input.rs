@@ -1,11 +1,16 @@
-use enigo::{Enigo, Key, Keyboard, Mouse, Settings};
+#[cfg(not(target_os = "macos"))]
+use enigo::Key;
+use enigo::{Enigo, Keyboard, Mouse, Settings};
 use std::sync::Mutex;
 use tauri::{AppHandle, Manager};
 
 #[cfg(target_os = "macos")]
 mod macos {
-    use super::Key;
+    use core_graphics::event::{CGEvent, CGEventFlags};
+    use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+    use enigo::Enigo;
     use log::{debug, warn};
+    use objc2_app_kit::NSWorkspace;
     use std::ffi::c_void;
 
     type TisInputSourceRef = *const c_void;
@@ -130,21 +135,73 @@ mod macos {
         Ok(keycode)
     }
 
-    pub(super) fn command_v_key() -> Key {
+    fn command_v_key() -> u16 {
         match resolve_command_v_keycode() {
             Ok(keycode) => {
                 debug!("Resolved Cmd+V for the active macOS layout to keycode {keycode}");
-                Key::Other(u32::from(keycode))
+                keycode
             }
             Err(error) => {
                 warn!(
                     "Could not resolve Cmd+V for the active macOS layout ({error}); using ANSI V keycode {ANSI_V_KEYCODE}"
                 );
-                Key::Other(u32::from(ANSI_V_KEYCODE))
+                ANSI_V_KEYCODE
             }
         }
     }
+
+    // Deliver both edges to the same app. Posting a separate global Command
+    // press/release can release the user's held dictation chord in handy-keys.
+    pub(crate) fn send_chord(key: u16, flags: CGEventFlags) -> Result<(), String> {
+        let target = NSWorkspace::sharedWorkspace()
+            .frontmostApplication()
+            .ok_or("No focused application for keyboard input")?;
+        let source = CGEventSource::new(CGEventSourceStateID::Private)
+            .map_err(|_| "Could not create keyboard event source")?;
+        let down = CGEvent::new_keyboard_event(source.clone(), key, true)
+            .map_err(|_| "Could not create key-down event")?;
+        let up = CGEvent::new_keyboard_event(source, key, false)
+            .map_err(|_| "Could not create key-up event")?;
+        for event in [down, up] {
+            event.set_flags(flags);
+            event.post_to_pid(target.processIdentifier());
+        }
+        Ok(())
+    }
+
+    pub fn send_paste_ctrl_v(_: &mut Enigo, _: u64) -> Result<(), String> {
+        send_chord(command_v_key(), CGEventFlags::CGEventFlagCommand)
+    }
+
+    pub fn send_paste_ctrl_shift_v(_: &mut Enigo, _: u64) -> Result<(), String> {
+        send_chord(
+            command_v_key(),
+            CGEventFlags::CGEventFlagCommand | CGEventFlags::CGEventFlagShift,
+        )
+    }
+
+    pub fn send_paste_shift_insert(_: &mut Enigo, _: u64) -> Result<(), String> {
+        send_chord(0x76, CGEventFlags::CGEventFlagShift)
+    }
+
+    pub(crate) fn send_return_key(
+        _: &mut Enigo,
+        key: crate::settings::AutoSubmitKey,
+    ) -> Result<(), String> {
+        use crate::settings::AutoSubmitKey;
+        let flags = match key {
+            AutoSubmitKey::Enter => CGEventFlags::empty(),
+            AutoSubmitKey::CtrlEnter => CGEventFlags::CGEventFlagControl,
+            AutoSubmitKey::CmdEnter => CGEventFlags::CGEventFlagCommand,
+        };
+        send_chord(0x24, flags)
+    }
 }
+
+#[cfg(target_os = "macos")]
+pub(crate) use macos::send_return_key;
+#[cfg(target_os = "macos")]
+pub use macos::{send_paste_ctrl_shift_v, send_paste_ctrl_v, send_paste_shift_insert};
 
 /// Wrapper for Enigo to store in Tauri's managed state.
 /// Enigo is wrapped in a Mutex since it requires mutable access.
@@ -176,10 +233,9 @@ pub fn get_cursor_position(app_handle: &AppHandle) -> Option<(i32, i32)> {
 /// handling the key need the modifier to still be down — the hold insures
 /// against those. Callers that can detect a failed chord (e.g. the
 /// receipt-sequenced paste path) may use a much shorter hold.
+#[cfg(not(target_os = "macos"))]
 pub fn send_paste_ctrl_v(enigo: &mut Enigo, hold_ms: u64) -> Result<(), String> {
     // Platform-specific key definitions
-    #[cfg(target_os = "macos")]
-    let (modifier_key, v_key_code) = (Key::Meta, macos::command_v_key());
     #[cfg(target_os = "windows")]
     let (modifier_key, v_key_code) = (Key::Control, Key::Other(0x56)); // VK_V
     #[cfg(target_os = "linux")]
@@ -205,10 +261,9 @@ pub fn send_paste_ctrl_v(enigo: &mut Enigo, hold_ms: u64) -> Result<(), String> 
 /// Sends a Ctrl+Shift+V paste command.
 /// This is commonly used in terminal applications on Linux to paste without formatting.
 /// Note: On Wayland, this may not work - callers should check for Wayland and use alternative methods.
+#[cfg(not(target_os = "macos"))]
 pub fn send_paste_ctrl_shift_v(enigo: &mut Enigo, hold_ms: u64) -> Result<(), String> {
     // Platform-specific key definitions
-    #[cfg(target_os = "macos")]
-    let (modifier_key, v_key_code) = (Key::Meta, macos::command_v_key());
     #[cfg(target_os = "windows")]
     let (modifier_key, v_key_code) = (Key::Control, Key::Other(0x56)); // VK_V
     #[cfg(target_os = "linux")]
@@ -240,6 +295,7 @@ pub fn send_paste_ctrl_shift_v(enigo: &mut Enigo, hold_ms: u64) -> Result<(), St
 /// Sends a Shift+Insert paste command (Windows and Linux only).
 /// This is more universal for terminal applications and legacy software.
 /// Note: On Wayland, this may not work - callers should check for Wayland and use alternative methods.
+#[cfg(not(target_os = "macos"))]
 pub fn send_paste_shift_insert(enigo: &mut Enigo, hold_ms: u64) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     let insert_key_code = Key::Other(0x2D); // VK_INSERT
@@ -269,6 +325,55 @@ pub fn paste_text_direct(enigo: &mut Enigo, text: &str) -> Result<(), String> {
     enigo
         .text(text)
         .map_err(|e| format!("Failed to send text directly: {}", e))?;
+
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn send_return_key(
+    enigo: &mut Enigo,
+    key_type: crate::settings::AutoSubmitKey,
+) -> Result<(), String> {
+    use crate::settings::AutoSubmitKey;
+    use enigo::Direction;
+    match key_type {
+        AutoSubmitKey::Enter => {
+            enigo
+                .key(Key::Return, Direction::Press)
+                .map_err(|e| format!("Failed to press Return key: {}", e))?;
+            enigo
+                .key(Key::Return, Direction::Release)
+                .map_err(|e| format!("Failed to release Return key: {}", e))?;
+        }
+        AutoSubmitKey::CtrlEnter => {
+            enigo
+                .key(Key::Control, Direction::Press)
+                .map_err(|e| format!("Failed to press Control key: {}", e))?;
+            enigo
+                .key(Key::Return, Direction::Press)
+                .map_err(|e| format!("Failed to press Return key: {}", e))?;
+            enigo
+                .key(Key::Return, Direction::Release)
+                .map_err(|e| format!("Failed to release Return key: {}", e))?;
+            enigo
+                .key(Key::Control, Direction::Release)
+                .map_err(|e| format!("Failed to release Control key: {}", e))?;
+        }
+        AutoSubmitKey::CmdEnter => {
+            enigo
+                .key(Key::Meta, Direction::Press)
+                .map_err(|e| format!("Failed to press Meta/Cmd key: {}", e))?;
+            enigo
+                .key(Key::Return, Direction::Press)
+                .map_err(|e| format!("Failed to press Return key: {}", e))?;
+            enigo
+                .key(Key::Return, Direction::Release)
+                .map_err(|e| format!("Failed to release Return key: {}", e))?;
+            enigo
+                .key(Key::Meta, Direction::Release)
+                .map_err(|e| format!("Failed to release Meta/Cmd key: {}", e))?;
+        }
+    }
 
     Ok(())
 }

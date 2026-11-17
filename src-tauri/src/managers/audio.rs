@@ -557,11 +557,11 @@ impl AudioRecordingManager {
             last_input_silent: Arc::new(AtomicBool::new(false)),
         };
 
-        // Always-on?  Open immediately.
         if matches!(mode, MicrophoneMode::AlwaysOn) {
-            manager.start_microphone_stream()?;
+            if let Err(err) = manager.start_microphone_stream() {
+                warn!("Could not warm microphone; will retry on key-down: {err}");
+            }
         }
-
         Ok(manager)
     }
 
