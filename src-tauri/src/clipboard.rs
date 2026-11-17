@@ -90,6 +90,7 @@ fn paste_via_clipboard(
         None
     };
 
+    dest.validate()?;
     // Write text to clipboard first
     write_text_to_clipboard(app_handle, text)?;
 
@@ -791,6 +792,10 @@ pub fn paste_to(text: String, app_handle: AppHandle, dest: PasteDestination) -> 
     let paste_method = settings.paste_method;
     let paste_delay_ms = settings.paste_delay_ms;
     let paste_delay_after_ms = settings.paste_delay_after_ms;
+
+    if paste_method != PasteMethod::None {
+        dest.validate()?;
+    }
 
     // Append trailing space if setting is enabled
     let text = if settings.append_trailing_space {

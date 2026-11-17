@@ -76,7 +76,7 @@ pub(crate) fn output_pending() -> bool {
 
 /// A younger take captured during an older decode has no engine work to cancel.
 pub(crate) fn cancel_current_dictation() -> bool {
-    let current = DictationSession::current();
+    let current = CURRENT.lock().unwrap();
     current.cancelled.store(true, Ordering::SeqCst);
     current.decoding.load(Ordering::SeqCst) || !output_pending()
 }

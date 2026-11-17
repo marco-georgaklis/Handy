@@ -14,6 +14,11 @@ impl DrainInputs {
         rx: &Receiver<Command>,
         state: &CoordinatorState,
     ) -> Option<(Command, Instant)> {
+        if let (Some(deadline), Some((_, at))) = (state.grace_deadline(), self.0.front()) {
+            if deadline <= *at {
+                return Some((Command::GraceExpired, deadline));
+            }
+        }
         if let Some(edge) = self.next(&state.stage) {
             return Some(edge);
         }
@@ -27,7 +32,23 @@ impl DrainInputs {
             }
             None => rx.recv().ok()?,
         };
-        Some((cmd, Instant::now()))
+        let at = match &cmd {
+            Command::Input(_, at, _) => *at,
+            _ => Instant::now(),
+        };
+        if let Some(deadline) = state.grace_deadline() {
+            if matches!(cmd, Command::Input(..)) && deadline <= at {
+                self.0.push_front((cmd, at));
+                return Some((Command::GraceExpired, deadline));
+            }
+        }
+        Some((cmd, at))
+    }
+
+    pub(super) fn press_waiting(&self) -> bool {
+        self.0
+            .iter()
+            .any(|(cmd, _)| matches!(cmd, Command::Input(input, ..) if input.is_pressed))
     }
 
     pub(super) fn next(&mut self, stage: &Stage) -> Option<(Command, Instant)> {
@@ -46,7 +67,7 @@ impl DrainInputs {
         interrupt: impl FnOnce(),
     ) -> Option<Command> {
         match &cmd {
-            Command::Input(input) if matches!(stage, Stage::Processing) => {
+            Command::Input(input, ..) if matches!(stage, Stage::Processing) => {
                 if input.is_pressed {
                     interrupt();
                 }
@@ -76,21 +97,25 @@ mod tests {
         let release = press + Duration::from_millis(650);
         let mut cuts = 0;
         for (is_pressed, at) in [(true, press), (false, release)] {
-            let edge = Command::Input(InputEvent {
-                binding_id: "transcribe".into(),
-                hotkey_string: "test".into(),
-                is_pressed,
-                mode: ShortcutActivation::PushToTalk,
-                hold_threshold: Duration::ZERO,
-                external: false,
-            });
+            let edge = Command::Input(
+                InputEvent {
+                    binding_id: "transcribe".into(),
+                    hotkey_string: "test".into(),
+                    is_pressed,
+                    mode: ShortcutActivation::PushToTalk,
+                    hold_threshold: Duration::ZERO,
+                    external: false,
+                },
+                at,
+                crate::input::PasteDestination::focused(),
+            );
             assert!(drain
                 .accept(edge, at, &Stage::Processing, || cuts += 1)
                 .is_none());
         }
         assert_eq!(cuts, 1);
         for (expected, time) in [(true, press), (false, release)] {
-            let Some((Command::Input(edge), at)) = drain.next(&Stage::Idle) else {
+            let Some((Command::Input(edge, ..), at)) = drain.next(&Stage::Idle) else {
                 panic!("lost edge")
             };
             assert_eq!((edge.is_pressed, at), (expected, time));

@@ -1,3 +1,4 @@
+use crate::input::PasteDestination;
 mod drain;
 use crate::actions::ACTION_MAP;
 use crate::managers::audio::AudioRecordingManager;
@@ -200,7 +201,7 @@ enum Effect {
 /// Commands processed sequentially by the coordinator thread.
 enum Command {
     GraceExpired,
-    Input(InputEvent),
+    Input(InputEvent, Instant, PasteDestination),
     Cancel,
     ProcessingFinished,
 }
@@ -583,6 +584,7 @@ impl TranscriptionCoordinator {
                 let mut state = CoordinatorState::new();
 
                 let mut drain = drain::DrainInputs::default();
+                let mut destination = PasteDestination::focused();
                 loop {
                     let Some((cmd, at)) = drain.receive(&rx, &state) else {
                         break;
@@ -598,16 +600,17 @@ impl TranscriptionCoordinator {
                     match cmd {
                         Command::GraceExpired => {
                             if let Some(effect) = state.on_grace_expired() {
-                                run_effect(&app, &mut state, effect);
+                                run_effect(&app, &mut state, effect, destination);
                             }
                         }
-                        Command::Input(input) => {
+                        Command::Input(input, _, target) => {
+                            destination = target;
                             let effect = state.on_input(input, at);
                             // macOS reports physical releases; only X11 needs repeat grace.
                             #[cfg(target_os = "macos")]
                             let effect = effect.or_else(|| state.on_grace_expired());
                             if let Some(effect) = effect {
-                                run_effect(&app, &mut state, effect);
+                                run_effect(&app, &mut state, effect, destination);
                             }
                         }
                         Command::Cancel => {
@@ -621,9 +624,14 @@ impl TranscriptionCoordinator {
                         }
                         Command::ProcessingFinished => {
                             if let Some(effect) = state.on_processing_finished() {
-                                run_effect(&app, &mut state, effect);
+                                run_effect(&app, &mut state, effect, destination);
                             }
                         }
+                    }
+                    if matches!(state.stage, Stage::Processing) && drain.press_waiting() {
+                        app.state::<Arc<AudioRecordingManager>>()
+                            .trailing_buffer
+                            .interrupt();
                     }
                     if !was_locked && state.is_recording_locked() {
                         emit_recording_phase(&app, RecordingPhase::Locked);
@@ -683,14 +691,18 @@ impl TranscriptionCoordinator {
     ) {
         if self
             .tx
-            .send(Command::Input(InputEvent {
-                binding_id: binding_id.to_string(),
-                hotkey_string: hotkey_string.to_string(),
-                is_pressed,
-                mode,
-                hold_threshold,
-                external,
-            }))
+            .send(Command::Input(
+                InputEvent {
+                    binding_id: binding_id.to_string(),
+                    hotkey_string: hotkey_string.to_string(),
+                    is_pressed,
+                    mode,
+                    hold_threshold,
+                    external,
+                },
+                Instant::now(),
+                PasteDestination::focused(),
+            ))
             .is_err()
         {
             warn!("Transcription coordinator channel closed");
@@ -710,7 +722,12 @@ impl TranscriptionCoordinator {
     }
 }
 
-fn run_effect(app: &AppHandle, state: &mut CoordinatorState, effect: Effect) {
+fn run_effect(
+    app: &AppHandle,
+    state: &mut CoordinatorState,
+    effect: Effect,
+    destination: PasteDestination,
+) {
     match effect {
         Effect::Start {
             binding_id,
@@ -726,7 +743,7 @@ fn run_effect(app: &AppHandle, state: &mut CoordinatorState, effect: Effect) {
             binding_id,
             hotkey_string,
         } => {
-            stop(app, &binding_id, &hotkey_string);
+            stop(app, &binding_id, &hotkey_string, destination);
             emit_recording_phase(app, RecordingPhase::Stopped);
         }
     }
@@ -749,12 +766,12 @@ fn start(app: &AppHandle, binding_id: &str, hotkey_string: &str) -> bool {
     recording
 }
 
-fn stop(app: &AppHandle, binding_id: &str, hotkey_string: &str) {
+fn stop(app: &AppHandle, binding_id: &str, hotkey_string: &str, destination: PasteDestination) {
     let Some(action) = ACTION_MAP.get(binding_id) else {
         warn!("No action in ACTION_MAP for '{binding_id}'");
         return;
     };
-    action.stop(app, binding_id, hotkey_string);
+    action.stop(app, binding_id, hotkey_string, destination);
 }
 
 #[cfg(test)]

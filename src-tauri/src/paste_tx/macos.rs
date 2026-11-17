@@ -298,6 +298,7 @@ pub(super) fn run(
     }
     let types = NSArray::from_retained_slice(&types);
 
+    dest.validate()?;
     // declareTypes:owner: clears the pasteboard and puts our promise on it;
     // the return value is the new changeCount.
     let change_count: NSInteger =
