@@ -239,7 +239,12 @@ mod tests {
             return;
         };
 
-        assert!(!own_tap_disabled(), "a fresh tap is enabled");
+        if own_tap_disabled() {
+            // Seen on a Mac where the test process lacks Input Monitoring:
+            // the tap is created but WindowServer leaves it switched off.
+            eprintln!("skipping: this process's event taps start disabled");
+            return;
+        }
         // Disabling from code sends no pseudo-event, the same state macOS
         // left the app in after sleep.
         CGEvent::tap_enable(&tap, false);
