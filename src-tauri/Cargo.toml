@@ -165,6 +165,9 @@ tauri-nspanel = { git = "https://github.com/ahkohd/tauri-nspanel", branch = "v2.
 objc2 = "0.6"
 objc2-foundation = "0.3"
 objc2-app-kit = "0.3"
+# Event tap health check and wake/unlock observers (shortcut/tap_recovery.rs).
+objc2-core-graphics = { version = "0.3", features = ["libc"] }
+block2 = "0.6"
 core-graphics = { version = "0.25", features = ["elcapitan"] }
 objc2-service-management = "0.3.2"
 

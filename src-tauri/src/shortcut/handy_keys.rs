@@ -28,10 +28,10 @@
 //! via Tauri's event system.
 
 use handy_keys::{Hotkey, HotkeyId, HotkeyManager, HotkeyState, KeyboardListener};
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
 use serde::Serialize;
 use specta::Type;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -41,6 +41,9 @@ use tauri::{AppHandle, Emitter, Manager};
 use crate::settings::{self, get_settings, ShortcutBinding};
 
 use super::handler::handle_shortcut_event;
+
+#[cfg(target_os = "macos")]
+mod tap_recovery;
 
 /// Commands that can be sent to the hotkey manager thread
 enum ManagerCommand {
@@ -52,6 +55,13 @@ enum ManagerCommand {
     Unregister {
         binding_id: String,
         response: Sender<Result<(), String>>,
+    },
+    /// Rebuild the listener if macOS disabled its event tap (see
+    /// `tap_recovery`). Checked on the manager thread so concurrent requests
+    /// rebuild at most once.
+    #[cfg(target_os = "macos")]
+    RecoverTap {
+        reason: &'static str,
     },
     Shutdown,
 }
@@ -114,23 +124,18 @@ impl HandyKeysState {
     /// The main manager thread - owns the HotkeyManager and processes commands
     fn manager_thread(cmd_rx: Receiver<ManagerCommand>, app: AppHandle, manager: HotkeyManager) {
         info!("handy-keys manager thread started");
+        // Replaced when macOS disables the tap (see `tap_recovery`).
+        #[cfg(target_os = "macos")]
+        let mut manager = manager;
 
         // Maps binding IDs to HotkeyIds and hotkey strings
         let mut binding_to_hotkey: HashMap<String, HotkeyId> = HashMap::new();
         let mut hotkey_to_binding: HashMap<HotkeyId, (String, String)> = HashMap::new(); // (binding_id, hotkey_string)
+                                                                                         // Bindings whose press was delivered and whose release was not yet.
+        let mut held: HashSet<String> = HashSet::new();
 
         loop {
-            // Check for hotkey events (non-blocking)
-            while let Some(event) = manager.try_recv() {
-                if let Some((binding_id, hotkey_string)) = hotkey_to_binding.get(&event.id) {
-                    debug!(
-                        "handy-keys event: binding={}, hotkey={}, state={:?}",
-                        binding_id, hotkey_string, event.state
-                    );
-                    let is_pressed = event.state == HotkeyState::Pressed;
-                    handle_shortcut_event(&app, binding_id, hotkey_string, is_pressed);
-                }
-            }
+            Self::dispatch_hotkey_events(&app, &manager, &hotkey_to_binding, &mut held);
 
             // Check for commands (non-blocking with timeout)
             match cmd_rx.recv_timeout(std::time::Duration::from_millis(10)) {
@@ -161,6 +166,18 @@ impl HandyKeysState {
                         );
                         let _ = response.send(result);
                     }
+                    #[cfg(target_os = "macos")]
+                    ManagerCommand::RecoverTap { reason } => {
+                        if let Some(rebuilt) = Self::rebuild_if_tap_disabled(
+                            &app,
+                            &mut binding_to_hotkey,
+                            &mut hotkey_to_binding,
+                            &mut held,
+                            reason,
+                        ) {
+                            manager = rebuilt;
+                        }
+                    }
                     ManagerCommand::Shutdown => {
                         info!("handy-keys manager thread shutting down");
                         break;
@@ -177,6 +194,96 @@ impl HandyKeysState {
         }
 
         info!("handy-keys manager thread stopped");
+    }
+
+    /// Deliver every pending hotkey event (non-blocking), tracking which
+    /// bindings are held so a rebuild can end holds whose release was lost.
+    fn dispatch_hotkey_events(
+        app: &AppHandle,
+        manager: &HotkeyManager,
+        hotkey_to_binding: &HashMap<HotkeyId, (String, String)>,
+        held: &mut HashSet<String>,
+    ) {
+        while let Some(event) = manager.try_recv() {
+            if let Some((binding_id, hotkey_string)) = hotkey_to_binding.get(&event.id) {
+                debug!(
+                    "handy-keys event: binding={}, hotkey={}, state={:?}",
+                    binding_id, hotkey_string, event.state
+                );
+                let is_pressed = event.state == HotkeyState::Pressed;
+                if is_pressed {
+                    held.insert(binding_id.clone());
+                } else {
+                    held.remove(binding_id);
+                }
+                handle_shortcut_event(app, binding_id, hotkey_string, is_pressed);
+            }
+        }
+    }
+
+    /// Replace the listener when macOS has disabled its tap. Returns the new
+    /// manager with every binding registered again, or `None` when the tap is
+    /// healthy or a new listener could not be created (the old one is kept).
+    #[cfg(target_os = "macos")]
+    fn rebuild_if_tap_disabled(
+        app: &AppHandle,
+        binding_to_hotkey: &mut HashMap<String, HotkeyId>,
+        hotkey_to_binding: &mut HashMap<HotkeyId, (String, String)>,
+        held: &mut HashSet<String>,
+        reason: &'static str,
+    ) -> Option<HotkeyManager> {
+        if !tap_recovery::own_tap_disabled() {
+            debug!("event tap check after {reason}: enabled");
+            return None;
+        }
+        warn!("event tap check after {reason}: macOS disabled the hotkey listener; rebuilding it");
+        // Before the rebuild, so a failed rebuild still ends the take.
+        Self::discard_interrupted_holds(app, held);
+
+        let rebuilt = match HotkeyManager::new_with_blocking() {
+            Ok(manager) => manager,
+            Err(e) => {
+                error!("Could not rebuild the hotkey listener, keeping the old one: {e}");
+                return None;
+            }
+        };
+
+        let bindings: Vec<(String, String)> = hotkey_to_binding.drain().map(|(_, b)| b).collect();
+        binding_to_hotkey.clear();
+        for (binding_id, hotkey_string) in &bindings {
+            if let Err(e) = Self::do_register(
+                &rebuilt,
+                binding_to_hotkey,
+                hotkey_to_binding,
+                binding_id,
+                hotkey_string,
+            ) {
+                error!("Could not re-register '{binding_id}' on the rebuilt listener: {e}");
+            }
+        }
+
+        info!(
+            "Hotkey listener rebuilt with {} binding(s)",
+            binding_to_hotkey.len()
+        );
+        Some(rebuilt)
+    }
+
+    /// A release that arrived while the tap was off was never seen, so a
+    /// push-to-talk take would record forever. Discard it rather than finish
+    /// it: finishing would paste (and maybe submit) the dictation into
+    /// whatever app is focused after unlock, not where the user was dictating.
+    #[cfg(target_os = "macos")]
+    fn discard_interrupted_holds(app: &AppHandle, held: &mut HashSet<String>) {
+        // Cancel acts on its press alone; only dictation holds own a take.
+        let interrupted: Vec<String> = held.drain().filter(|id| id != "cancel").collect();
+        // Toggle takes never end on a release, so a lost one changes nothing.
+        let toggle = get_settings(app).shortcut_activation == settings::ShortcutActivation::Toggle;
+        if interrupted.is_empty() || toggle {
+            return;
+        }
+        warn!("Discarding the take held by {interrupted:?}: its release was lost while the tap was off");
+        crate::utils::cancel_current_operation(app);
     }
 
     /// Register a hotkey
@@ -237,6 +344,24 @@ impl HandyKeysState {
 
         rx.recv()
             .map_err(|_| "Failed to receive register response")?
+    }
+
+    /// Ask the manager thread to rebuild the listener if its tap is disabled.
+    /// Does not wait: the check talks to WindowServer.
+    #[cfg(target_os = "macos")]
+    pub fn request_tap_recovery(&self, reason: &'static str) {
+        let sent = self
+            .command_sender
+            .lock()
+            .map_err(|_| "Failed to lock command_sender".to_string())
+            .and_then(|sender| {
+                sender
+                    .send(ManagerCommand::RecoverTap { reason })
+                    .map_err(|_| "manager thread stopped".to_string())
+            });
+        if let Err(e) = sent {
+            warn!("Could not request hotkey listener recovery: {e}");
+        }
     }
 
     /// Unregister a shortcut binding
@@ -449,8 +574,23 @@ pub fn init_shortcuts(app: &AppHandle) -> Result<(), String> {
     }
 
     app.manage(state);
+    #[cfg(target_os = "macos")]
+    tap_recovery::start(app);
     info!("handy-keys shortcuts initialized");
     Ok(())
+}
+
+/// Rebuild the hotkey listener if macOS disabled its event tap. A no-op when
+/// handy-keys is not the active implementation: after a switch to Tauri its
+/// state stays managed with nothing registered.
+#[cfg(target_os = "macos")]
+pub fn recover_tap_if_disabled(app: &AppHandle, reason: &'static str) {
+    if get_settings(app).keyboard_implementation != settings::KeyboardImplementation::HandyKeys {
+        return;
+    }
+    if let Some(state) = app.try_state::<HandyKeysState>() {
+        state.request_tap_recovery(reason);
+    }
 }
 
 /// Register a shortcut
